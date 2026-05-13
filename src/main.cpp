@@ -1,0 +1,109 @@
+#include <Arduino.h>
+#include <LittleFS.h>
+#include <WiFi.h>
+#include <lvgl.h>
+#include <time.h>
+
+#include "config.h"
+#include "display/fs_littlefs.h"
+#include "display/lgfx_cyd.hpp"
+#include "display/lvgl_bridge.h"
+#include "net/quote_fetcher.h"
+#include "net/quote_store.h"
+#include "net/web_admin.h"
+#include "net/wifi_mgr.h"
+#include "secrets.h"
+#include "settings/settings_store.h"
+#include "ui/detail_screen.h"
+#include "ui/list_screen.h"
+#include "ui/settings_screen.h"
+#include "ui/styles.h"
+
+namespace {
+
+LGFX_CYD       g_gfx;
+SettingsStore  g_settings;
+QuoteStore     g_quoteStore;
+SemaphoreHandle_t g_lvglMu = nullptr;
+
+void uiTask(void*) {
+  xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+  styles::init();
+  settings_screen::init(&g_settings);
+  list_screen::build(&g_quoteStore);
+  lv_screen_load(list_screen::screen());
+  xSemaphoreGive(g_lvglMu);
+
+  uint32_t lastPoll = 0;
+  for (;;) {
+    xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+    uint32_t wait = lv_timer_handler();
+    if (millis() - lastPoll > 500) {
+      list_screen::tick();
+      detail_screen::tick();
+      settings_screen::tick();
+      lastPoll = millis();
+    }
+    xSemaphoreGive(g_lvglMu);
+    vTaskDelay(pdMS_TO_TICKS(wait > 30 ? 30 : (wait ? wait : 5)));
+  }
+}
+
+void netTask(void*) {
+  wifi_mgr::begin(WIFI_SSID, WIFI_PASS);
+
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  web_admin::begin(&g_settings);
+
+  uint32_t lastFetch = 0;
+  for (;;) {
+    if (wifi_mgr::connected()) {
+      if (lastFetch == 0 ||
+          millis() - lastFetch > g_settings.refreshSeconds() * 1000UL) {
+        if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
+          lastFetch = millis();
+        } else {
+          lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 5000;
+        }
+      }
+      String pending = g_quoteStore.takePendingHistory();
+      if (pending.length()) {
+        fetcher::fetchHistory(g_settings, g_quoteStore, pending);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  log_i("CYD stock ticker starting");
+
+  if (!LittleFS.begin(true)) {
+    log_e("LittleFS mount failed");
+  }
+  g_settings.begin(RAPID_KEY_SEED);
+  g_quoteStore.begin();
+
+  g_gfx.init();
+  g_gfx.setRotation(1);   // landscape, USB-C/header at left
+  g_gfx.setBrightness(255);
+  g_gfx.fillScreen(0x0000);
+
+  lv_init();
+  bridge::init(&g_gfx);
+  fs_littlefs::init();
+
+  g_lvglMu = xSemaphoreCreateMutex();
+
+  xTaskCreatePinnedToCore(uiTask,  "ui",  8192,  nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(netTask, "net", 12288, nullptr, 1, nullptr, 0);
+}
+
+void loop() {
+  vTaskDelete(nullptr);
+}

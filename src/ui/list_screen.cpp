@@ -1,0 +1,295 @@
+#include "list_screen.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <time.h>
+
+#include "../config.h"
+#include "../net/quote_store.h"
+#include "detail_screen.h"
+#include "logos.h"
+#include "settings_screen.h"
+#include "styles.h"
+
+namespace {
+
+constexpr uint16_t STATUS_H     = 22;
+constexpr uint16_t ROW_H        = 52;
+constexpr uint16_t ROW_GAP      = 4;
+constexpr uint16_t LOGO_SIZE    = 40;
+constexpr uint16_t SPARK_W      = 96;
+constexpr uint16_t SPARK_H      = 28;
+constexpr uint16_t VISIBLE_ROWS = (cfg::SCREEN_H - STATUS_H) / (ROW_H + ROW_GAP);
+
+QuoteStore* g_store = nullptr;
+
+lv_obj_t*  g_scr        = nullptr;
+lv_obj_t*  g_list       = nullptr;
+lv_obj_t*  g_wifi_icon  = nullptr;
+lv_obj_t*  g_updated    = nullptr;
+lv_obj_t*  g_gear       = nullptr;
+lv_timer_t* g_rot_timer = nullptr;
+
+struct Row {
+  lv_obj_t* obj;
+  lv_obj_t* logo;
+  lv_obj_t* sym;
+  lv_obj_t* price;
+  lv_obj_t* pct;
+  lv_obj_t* spark;
+  lv_point_precise_t spark_pts[cfg::SPARKLINE_POINTS];
+  String    symbol;
+};
+std::vector<Row> g_rows;
+
+void on_row_click(lv_event_t* e) {
+  const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
+  if (!sym) return;
+  detail_screen::show(g_store, sym);
+}
+
+Row make_row(lv_obj_t* parent, const String& symbol) {
+  Row r{};
+  r.symbol = symbol;
+
+  r.obj = lv_obj_create(parent);
+  lv_obj_remove_style_all(r.obj);
+  lv_obj_add_style(r.obj, &styles::row, LV_STATE_DEFAULT);
+  lv_obj_add_style(r.obj, &styles::row_pressed, LV_STATE_PRESSED);
+  lv_obj_set_size(r.obj, cfg::SCREEN_W - 12, ROW_H);
+  lv_obj_set_flex_flow(r.obj, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(r.obj, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(r.obj, 6, 0);
+  lv_obj_set_scrollbar_mode(r.obj, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(r.obj, LV_OBJ_FLAG_CLICKABLE);
+
+  r.logo = logos::make(r.obj, symbol, LOGO_SIZE);
+  lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  lv_obj_t* sym_col = lv_obj_create(r.obj);
+  lv_obj_remove_style_all(sym_col);
+  lv_obj_set_size(sym_col, 60, ROW_H - 8);
+  lv_obj_set_flex_flow(sym_col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(sym_col, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(sym_col, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(sym_col, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  r.sym = lv_label_create(sym_col);
+  lv_obj_add_style(r.sym, &styles::sym_small, 0);
+  lv_label_set_text(r.sym, symbol.c_str());
+
+  r.spark = lv_line_create(r.obj);
+  lv_obj_set_size(r.spark, SPARK_W, SPARK_H);
+  lv_obj_set_style_line_width(r.spark, 2, 0);
+  lv_obj_set_style_line_rounded(r.spark, true, 0);
+  lv_obj_set_style_line_color(r.spark, styles::muted_color(), 0);
+  lv_obj_add_flag(r.spark, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  lv_obj_t* price_col = lv_obj_create(r.obj);
+  lv_obj_remove_style_all(price_col);
+  lv_obj_set_size(price_col, LV_SIZE_CONTENT, ROW_H - 8);
+  lv_obj_set_flex_grow(price_col, 1);
+  lv_obj_set_flex_flow(price_col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(price_col, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+  lv_obj_clear_flag(price_col, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(price_col, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  r.price = lv_label_create(price_col);
+  lv_obj_add_style(r.price, &styles::price, 0);
+  lv_label_set_text(r.price, "—");
+
+  r.pct = lv_label_create(price_col);
+  lv_obj_add_style(r.pct, &styles::muted, 0);
+  lv_label_set_text(r.pct, "—");
+
+  char* heapSym = strdup(symbol.c_str());
+  lv_obj_add_event_cb(r.obj, on_row_click, LV_EVENT_CLICKED, heapSym);
+  return r;
+}
+
+void update_spark(Row& r, const std::vector<float>& closes, bool up) {
+  if (closes.size() < 2) {
+    lv_line_set_points(r.spark, r.spark_pts, 0);
+    return;
+  }
+  size_t n = closes.size();
+  if (n > cfg::SPARKLINE_POINTS) n = cfg::SPARKLINE_POINTS;
+  float lo = closes.back(), hi = closes.back();
+  for (size_t i = closes.size() - n; i < closes.size(); ++i) {
+    if (closes[i] < lo) lo = closes[i];
+    if (closes[i] > hi) hi = closes[i];
+  }
+  float span = hi - lo;
+  if (span < 0.0001f) span = 1.0f;
+
+  const lv_coord_t W = SPARK_W - 2;
+  const lv_coord_t H = SPARK_H - 4;
+  for (size_t i = 0; i < n; ++i) {
+    float v = closes[closes.size() - n + i];
+    float t = (n == 1) ? 0.5f : (float)i / (float)(n - 1);
+    r.spark_pts[i].x = (lv_value_precise_t)(1 + t * W);
+    r.spark_pts[i].y =
+        (lv_value_precise_t)(2 + (1.0f - (v - lo) / span) * H);
+  }
+  lv_line_set_points(r.spark, r.spark_pts, n);
+  lv_obj_set_style_line_color(
+      r.spark, up ? styles::up_color() : styles::dn_color(), 0);
+}
+
+void rebuild_rows(const std::vector<Quote>& quotes) {
+  bool same = quotes.size() == g_rows.size();
+  for (size_t i = 0; same && i < quotes.size(); ++i) {
+    if (quotes[i].symbol != g_rows[i].symbol) same = false;
+  }
+  if (!same) {
+    lv_obj_clean(g_list);
+    g_rows.clear();
+    g_rows.reserve(quotes.size());
+    for (const auto& q : quotes) g_rows.push_back(make_row(g_list, q.symbol));
+  }
+  for (size_t i = 0; i < quotes.size(); ++i) {
+    const auto& q = quotes[i];
+    Row& r = g_rows[i];
+    if (!q.fresh) {
+      lv_label_set_text(r.price, "—");
+      lv_label_set_text(r.pct, "—");
+      lv_obj_remove_style(r.pct, &styles::pct_up, 0);
+      lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
+      lv_obj_add_style(r.pct, &styles::muted, 0);
+      lv_line_set_points(r.spark, r.spark_pts, 0);
+      continue;
+    }
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.2f", q.last);
+    lv_label_set_text(r.price, buf);
+    snprintf(buf, sizeof(buf), "%s %+.2f%%", q.changePct >= 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, q.changePct);
+    lv_label_set_text(r.pct, buf);
+
+    lv_obj_remove_style(r.pct, &styles::muted, 0);
+    lv_obj_remove_style(r.pct, &styles::pct_up, 0);
+    lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
+    lv_obj_add_style(r.pct,
+                     q.changePct >= 0 ? &styles::pct_up : &styles::pct_dn, 0);
+    update_spark(r, q.sparkline, q.changePct >= 0);
+  }
+}
+
+void refresh_wifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_WIFI " %ld", (long)WiFi.RSSI());
+    lv_label_set_text(g_wifi_icon, buf);
+    lv_obj_set_style_text_color(g_wifi_icon, styles::up_color(), 0);
+  } else {
+    lv_label_set_text(g_wifi_icon, LV_SYMBOL_CLOSE " no link");
+    lv_obj_set_style_text_color(g_wifi_icon, styles::dn_color(), 0);
+  }
+}
+
+void update_status(time_t lastUpdate) {
+  refresh_wifi();
+  if (lastUpdate == 0) {
+    lv_label_set_text(g_updated, "—");
+  } else {
+    struct tm t;
+    localtime_r(&lastUpdate, &t);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+             t.tm_hour, t.tm_min, t.tm_sec);
+    lv_label_set_text(g_updated, buf);
+  }
+}
+
+void on_gear_click(lv_event_t*) {
+  settings_screen::show();
+}
+
+void rotate_cb(lv_timer_t*) {
+  if (g_rows.size() <= VISIBLE_ROWS) return;
+  lv_coord_t y = lv_obj_get_scroll_y(g_list);
+  lv_coord_t max = lv_obj_get_scroll_bottom(g_list) + y;
+  lv_coord_t next = y + (ROW_H + ROW_GAP);
+  if (next >= max) next = 0;
+  lv_obj_scroll_to_y(g_list, next, LV_ANIM_ON);
+}
+
+}  // namespace
+
+namespace list_screen {
+
+void build(QuoteStore* store) {
+  g_store = store;
+  g_scr = lv_obj_create(nullptr);
+  lv_obj_set_style_bg_color(g_scr, styles::bg_color(), 0);
+  lv_obj_set_style_bg_opa(g_scr, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(g_scr, 0, 0);
+  lv_obj_clear_flag(g_scr, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* bar = lv_obj_create(g_scr);
+  lv_obj_remove_style_all(bar);
+  lv_obj_add_style(bar, &styles::status_bar, 0);
+  lv_obj_set_size(bar, cfg::SCREEN_W, STATUS_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  g_wifi_icon = lv_label_create(bar);
+  lv_obj_add_style(g_wifi_icon, &styles::status_text, 0);
+  lv_label_set_text(g_wifi_icon, LV_SYMBOL_CLOSE " no link");
+  lv_obj_set_style_text_color(g_wifi_icon, styles::dn_color(), 0);
+
+  lv_obj_t* title = lv_label_create(bar);
+  lv_obj_add_style(title, &styles::status_text, 0);
+  lv_label_set_text(title, "MARKETS");
+
+  g_updated = lv_label_create(bar);
+  lv_obj_add_style(g_updated, &styles::status_text, 0);
+  lv_label_set_text(g_updated, "—");
+
+  g_gear = lv_label_create(bar);
+  lv_obj_add_style(g_gear, &styles::status_text, 0);
+  lv_label_set_text(g_gear, LV_SYMBOL_SETTINGS);
+  lv_obj_set_style_pad_hor(g_gear, 6, 0);
+  lv_obj_set_style_pad_ver(g_gear, 2, 0);
+  lv_obj_add_flag(g_gear, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(g_gear, on_gear_click, LV_EVENT_CLICKED, nullptr);
+
+  g_list = lv_obj_create(g_scr);
+  lv_obj_remove_style_all(g_list);
+  lv_obj_set_size(g_list, cfg::SCREEN_W, cfg::SCREEN_H - STATUS_H);
+  lv_obj_align(g_list, LV_ALIGN_TOP_MID, 0, STATUS_H);
+  lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(g_list, ROW_GAP, 0);
+  lv_obj_set_style_pad_ver(g_list, ROW_GAP, 0);
+  lv_obj_set_style_bg_color(g_list, styles::bg_color(), 0);
+  lv_obj_set_style_bg_opa(g_list, LV_OPA_COVER, 0);
+  lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
+
+  g_rot_timer = lv_timer_create(rotate_cb, 4000, nullptr);
+}
+
+lv_obj_t* screen() { return g_scr; }
+
+void tick() {
+  if (!g_store) return;
+  static time_t lastSeen = 0;
+  auto quotes = g_store->snapshot();
+  time_t lu = g_store->lastUpdate();
+  if (lu != lastSeen || g_rows.size() != quotes.size()) {
+    rebuild_rows(quotes);
+    update_status(lu);
+    lastSeen = lu;
+  } else {
+    refresh_wifi();
+  }
+}
+
+}  // namespace list_screen
