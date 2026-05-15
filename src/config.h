@@ -4,7 +4,12 @@
 
 namespace cfg {
 
-inline constexpr const char* RAPID_HOST  = "yahoo-finance15.p.rapidapi.com";
+// Self-hosted yfinance proxy at rozakos.eu. Bearer-token auth; Cloudflare
+// bot-fight blocks empty/default User-Agents, so requests MUST send a
+// non-empty UA — see API_USER_AGENT.
+inline constexpr const char* API_BASE       = "https://rozakos.eu/stocks/api/v1";
+inline constexpr const char* API_USER_AGENT = "CYD-Stock-Ticker/1.0 (ESP32)";
+
 inline constexpr const char* DEFAULT_SYMBOLS =
     "AAPL,MSFT,NVDA,TSLA,GOOG";
 

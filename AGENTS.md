@@ -8,8 +8,9 @@ and current; delete stale notes rather than leaving them.
 
 ESP32-2432S028R "Cheap Yellow Display" firmware: a 320×240 stock ticker.
 List screen of symbols, detail screen with a chart, on-device settings info
-screen, and a small web admin at `/settings` for editing the RapidAPI key /
-symbols / refresh interval.
+screen, and a small web admin at `/settings` for editing the API bearer
+token / symbols / refresh interval. Data source is a self-hosted yfinance
+proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Stack & invariants
 
@@ -31,13 +32,16 @@ symbols / refresh interval.
   `SettingsStore` under a mutex. LVGL itself is single-threaded behind
   `g_lvglMu`; LVGL's own OSAL is set to `LV_OS_NONE` because ESP-IDF doesn't
   ship the `atomic.h` that LVGL's FreeRTOS OSAL expects.
-- **JSON parsing**: ArduinoJson v7 with a `close`-only filter to keep the
-  streamed body off the heap. Tolerates three response shapes: `body[]`,
-  `data.items[]`, `data.prices[]`. Both numeric and string close values are
-  accepted.
+- **JSON parsing**: ArduinoJson v7 with field filters so the streamed
+  body never lands fully in RAM. `/stock/{sym}` filter keeps `last`,
+  `change_pct`, `closes`; `/history/{sym}` filter keeps `points[].last`.
 - **HTTPS**: `WiFiClientSecure::setInsecure()` + `http.useHTTP10(true)` +
   `Accept-Encoding: identity`. Don't change these without testing — they
-  are workarounds for actual breakage on this RapidAPI host.
+  are workarounds for actual breakage we've hit in production.
+- **stock-api auth**: every request sends `Authorization: Bearer <token>`
+  AND a non-empty `User-Agent` (`cfg::API_USER_AGENT`). The UA is *not*
+  cosmetic — Cloudflare bot-fight at the edge drops empty/default UAs
+  before the request reaches the FastAPI app.
 
 ## Memory budget (the part that bites)
 
@@ -59,7 +63,7 @@ costs flash, not DRAM.
 src/
   main.cpp                       FreeRTOS tasks, mutex, LittleFS, LVGL init
   config.h                       SCREEN_W/H, HISTORY_POINTS, SPARKLINE_POINTS
-  secrets.h                      gitignored — real WiFi/RapidAPI key
+  secrets.h                      gitignored — seed bearer token + fallback WiFi creds
   secrets_example.h              template
 
   display/
@@ -71,11 +75,12 @@ src/
     quote_store.{h,cpp}          Quote{symbol,last,changePct,fresh,sparkline}
                                  + History{symbol,closes}. Mutex-guarded.
     quote_fetcher.{h,cpp}        fetchQuotes / fetchHistory. Filtered JSON.
-    wifi_mgr.{h,cpp}             non-blocking connect
+    wifi_mgr.{h,cpp}             STA connect + open-AP fallback (CYD-Setup-XXXX)
+    captive_portal.{h,cpp}       DNS hijack + AsyncWebServer /save for AP mode
     web_admin.{h,cpp}            AsyncWebServer at /settings (basic auth)
 
   settings/
-    settings_store.{h,cpp}       LittleFS-backed runtime settings
+    settings_store.{h,cpp}       LittleFS-backed runtime settings (incl. wifi creds)
 
   ui/
     styles.{h,cpp}               colors, fonts, brand_color(symbol) lookup
@@ -83,6 +88,7 @@ src/
     list_screen.{h,cpp}          status bar (wifi/title/clock/gear) + rows
     detail_screen.{h,cpp}        header card + chart card + stats
     settings_screen.{h,cpp}      read-only on-device info screen
+    wifi_setup_screen.{h,cpp}    fullscreen QR + instructions shown in AP mode
 ```
 
 ## How features wire together
@@ -169,6 +175,31 @@ Two sim caveats worth knowing:
 
 ## Recently shipped (most recent first)
 
+- **WiFi captive portal + QR onboarding** (2026-05): WiFi creds are now
+  stored in `/settings.json` (`wifi_ssid`/`wifi_pass`) instead of being
+  compile-time constants. `wifi_mgr::begin(SettingsStore&)` tries STA;
+  on failure it opens an open AP named `CYD-Setup-<MAC>` and the
+  device shows a fullscreen QR code (`WIFI:T:WPA;S:...;P:...;;`) so a
+  phone can join in one scan. `captive_portal::begin()` runs a DNS
+  hijack (port 53) + AsyncWebServer at `192.168.4.1` with a network
+  picker; POST `/save` writes creds and triggers an STA retry. Probe
+  URLs for Android (`/generate_204`), iOS (`/hotspot-detect.html`),
+  Windows (`/connecttest.txt`) are wired so phones pop the captive
+  sheet automatically. Requires `LV_USE_QRCODE 1` (+ `LV_USE_CANVAS 1`
+  dep) in `lv_conf.h`. Existing devices upgrade smoothly: the loader
+  falls back to `WIFI_SSID`/`WIFI_PASS` from `secrets.h` when
+  `wifi_ssid` is absent from settings, so on-disk state from prior
+  firmware just keeps working.
+- **Swap data source from RapidAPI Yahoo to self-hosted stock-api**
+  (2026-05): `src/net/quote_fetcher.cpp` now hits
+  `https://rozakos.eu/stocks/api/v1` with bearer-token auth and a
+  required non-empty User-Agent. `RAPID_KEY_SEED` → `API_TOKEN_SEED`
+  in `secrets.h`. Quote response now includes pre-computed
+  `last`/`change_pct` and a `closes[]` array used directly for the
+  sparkline (5 daily closes vs the prior 10). History endpoint now
+  returns minute bars (`/history/{sym}?days=1`) so the detail chart
+  shows intraday rather than 30 daily closes — bump `days=` in
+  `fetchHistory` to widen the window.
 - **LVGL desktop simulator** (2026-05): added `sim/` with CMake/MSYS2/SDL2
   build that compiles the UI sources against an Arduino shim and renders
   to either an SDL window or PNG screenshots. Headless mode lets the

@@ -6,6 +6,7 @@
 
 #include "../config.h"
 #include "../net/quote_store.h"
+#include "../settings/settings_store.h"
 #include "detail_screen.h"
 #include "logos.h"
 #include "settings_screen.h"
@@ -21,7 +22,8 @@ constexpr uint16_t SPARK_W      = 96;
 constexpr uint16_t SPARK_H      = 28;
 constexpr uint16_t VISIBLE_ROWS = (cfg::SCREEN_H - STATUS_H) / (ROW_H + ROW_GAP);
 
-QuoteStore* g_store = nullptr;
+QuoteStore*    g_store    = nullptr;
+SettingsStore* g_settings = nullptr;
 
 lv_obj_t*  g_scr        = nullptr;
 lv_obj_t*  g_list       = nullptr;
@@ -208,6 +210,31 @@ void on_gear_click(lv_event_t*) {
   settings_screen::show();
 }
 
+void on_wifi_reset_confirm(lv_event_t* e) {
+  SettingsStore* s = static_cast<SettingsStore*>(lv_event_get_user_data(e));
+  if (s) s->setWifi("", "");
+  delay(150);          // give LittleFS time to flush
+  ESP.restart();
+}
+
+void on_wifi_reset_cancel(lv_event_t* e) {
+  auto* btn  = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  auto* mbox = lv_obj_get_parent(lv_obj_get_parent(btn));   // btn -> footer -> mbox
+  lv_msgbox_close(mbox);
+}
+
+void on_wifi_click(lv_event_t* e) {
+  SettingsStore* s = static_cast<SettingsStore*>(lv_event_get_user_data(e));
+  lv_obj_t* mbox = lv_msgbox_create(nullptr);
+  lv_msgbox_add_title(mbox, "Reset WiFi");
+  lv_msgbox_add_text(mbox,
+      "Forget the saved network and reboot into setup mode (QR code)?");
+  lv_obj_t* cancel = lv_msgbox_add_footer_button(mbox, "Cancel");
+  lv_obj_add_event_cb(cancel, on_wifi_reset_cancel, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* reset = lv_msgbox_add_footer_button(mbox, "Reset");
+  lv_obj_add_event_cb(reset, on_wifi_reset_confirm, LV_EVENT_CLICKED, s);
+}
+
 void rotate_cb(lv_timer_t*) {
   if (g_rows.size() <= VISIBLE_ROWS) return;
   lv_coord_t y = lv_obj_get_scroll_y(g_list);
@@ -221,8 +248,9 @@ void rotate_cb(lv_timer_t*) {
 
 namespace list_screen {
 
-void build(QuoteStore* store) {
-  g_store = store;
+void build(QuoteStore* store, SettingsStore* settings) {
+  g_store    = store;
+  g_settings = settings;
   g_scr = lv_obj_create(nullptr);
   lv_obj_set_style_bg_color(g_scr, styles::bg_color(), 0);
   lv_obj_set_style_bg_opa(g_scr, LV_OPA_COVER, 0);
@@ -242,6 +270,11 @@ void build(QuoteStore* store) {
   lv_obj_add_style(g_wifi_icon, &styles::status_text, 0);
   lv_label_set_text(g_wifi_icon, LV_SYMBOL_CLOSE " no link");
   lv_obj_set_style_text_color(g_wifi_icon, styles::dn_color(), 0);
+  // Tap to forget WiFi + reboot into setup-AP (QR onboarding).
+  lv_obj_set_style_pad_hor(g_wifi_icon, 6, 0);
+  lv_obj_set_style_pad_ver(g_wifi_icon, 2, 0);
+  lv_obj_add_flag(g_wifi_icon, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(g_wifi_icon, on_wifi_click, LV_EVENT_CLICKED, g_settings);
 
   lv_obj_t* title = lv_label_create(bar);
   lv_obj_add_style(title, &styles::status_text, 0);

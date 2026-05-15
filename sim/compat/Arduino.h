@@ -170,3 +170,10 @@ class SerialStub {
   void flush() { std::fflush(stdout); }
 };
 extern SerialStub Serial;
+
+// ESP-specific singleton — Arduino-ESP32 exposes ESP.restart() etc.
+class EspStub {
+ public:
+  [[noreturn]] void restart() { std::_Exit(0); }
+};
+extern EspStub ESP;

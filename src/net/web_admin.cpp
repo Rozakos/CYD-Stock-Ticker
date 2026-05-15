@@ -35,7 +35,7 @@ String page(const SettingsStore& s, const String& flash = "") {
     html += "<div class=flash>" + flash + "</div>";
   }
   html += F("<form method=POST action=/settings>"
-            "<label>RapidAPI key</label>"
+            "<label>API bearer token</label>"
             "<input name=api_key placeholder='leave blank to keep current'>"
             "<div class=note>current: ");
   html += maskKey(s.apiKey());

@@ -76,15 +76,15 @@
 #define LV_USE_CALENDAR 0
 #define LV_USE_COLORWHEEL 0
 #define LV_USE_LED 0
-#define LV_USE_MSGBOX 0
+#define LV_USE_MSGBOX 1
 #define LV_USE_TABVIEW 0
 #define LV_USE_TILEVIEW 0
 #define LV_USE_WIN 0
 #define LV_USE_IMGBTN 0
-#define LV_USE_CANVAS 0
+#define LV_USE_CANVAS 1   /* required by LV_USE_QRCODE */
 #define LV_USE_ANIMIMG 0
 #define LV_USE_SPAN 0
-#define LV_USE_QRCODE 0
+#define LV_USE_QRCODE 1
 #define LV_USE_BARCODE 0
 #define LV_USE_MENU 0
 

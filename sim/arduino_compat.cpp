@@ -36,3 +36,4 @@ void sim_log(char level, const char* fmt, ...) {
 SerialStub   Serial;
 WiFiStub     WiFi;
 LittleFSStub LittleFS;
+EspStub      ESP;

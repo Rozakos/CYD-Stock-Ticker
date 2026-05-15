@@ -5,7 +5,6 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
-#include <algorithm>
 #include <time.h>
 #include <vector>
 
@@ -15,57 +14,8 @@
 
 namespace {
 
-// Confirmed working in another deployment using this same RapidAPI host.
-constexpr const char* HISTORY_PATH = "/api/v2/markets/stock/history";
-
-// JSON key/value tolerance: closes may arrive as numbers or as strings.
-float toFloat(JsonVariantConst v) {
-  if (v.is<const char*>()) {
-    const char* s = v.as<const char*>();
-    if (!s || !*s) return NAN;
-    char* end = nullptr;
-    float f = strtof(s, &end);
-    return (end == s) ? NAN : f;
-  }
-  if (v.is<float>() || v.is<double>() || v.is<int>() || v.is<long>()) {
-    return v.as<float>();
-  }
-  return NAN;
-}
-
-bool extractLastTwo(JsonVariantConst arr, float& last, float& prev) {
-  last = prev = NAN;
-  if (!arr.is<JsonArrayConst>()) return false;
-  JsonArrayConst a = arr.as<JsonArrayConst>();
-  if (a.size() < 2) return false;
-  for (int i = (int)a.size() - 1; i >= 0; --i) {
-    float c = toFloat(a[i]["close"]);
-    if (isnan(c) || c <= 0) continue;
-    if (isnan(last))      last = c;
-    else                  { prev = c; break; }
-  }
-  return !isnan(last) && !isnan(prev);
-}
-
-std::vector<float> extractAllCloses(JsonVariantConst arr) {
-  std::vector<float> out;
-  if (!arr.is<JsonArrayConst>()) return out;
-  for (JsonVariantConst row : arr.as<JsonArrayConst>()) {
-    float c = toFloat(row["close"]);
-    if (!isnan(c) && c > 0) out.push_back(c);
-  }
-  return out;
-}
-
-// Filter keeps only the `close` field across all three known schemas, so the
-// streamed body never lands fully in RAM.
-void buildCloseFilter(JsonDocument& filter) {
-  filter["body"][0]["close"]            = true;  // schema 1: body[]
-  filter["data"]["items"][0]["close"]   = true;  // schema 2: data.items[]
-  filter["data"]["prices"][0]["close"]  = true;  // schema 3: data.prices[]
-}
-
-bool fetchAndParse(const String& url, const String& key, JsonDocument& doc) {
+bool fetchAndParse(const String& url, const String& token,
+                   const JsonDocument& filter, JsonDocument& doc) {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -73,10 +23,13 @@ bool fetchAndParse(const String& url, const String& key, JsonDocument& doc) {
   http.setReuse(false);
   if (!http.begin(client, url)) return false;
 
-  http.useHTTP10(true);                            // avoid chunked transfer
-  http.addHeader("Accept-Encoding", "identity");   // avoid gzip/deflate
-  http.addHeader("x-rapidapi-key",  key);
-  http.addHeader("x-rapidapi-host", cfg::RAPID_HOST);
+  http.useHTTP10(true);                              // avoid chunked transfer
+  http.addHeader("Accept-Encoding", "identity");     // avoid gzip/deflate
+  // Cloudflare bot-fight rejects empty/default User-Agents — required.
+  http.addHeader("User-Agent",       cfg::API_USER_AGENT);
+  if (token.length()) {
+    http.addHeader("Authorization", String("Bearer ") + token);
+  }
 
   int code = http.GET();
   if (code != 200) {
@@ -85,8 +38,6 @@ bool fetchAndParse(const String& url, const String& key, JsonDocument& doc) {
     return false;
   }
 
-  JsonDocument filter;
-  buildCloseFilter(filter);
   DeserializationError err = deserializeJson(
       doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
@@ -97,32 +48,24 @@ bool fetchAndParse(const String& url, const String& key, JsonDocument& doc) {
   return true;
 }
 
-bool extractFromAnySchema(JsonDocument& doc, float& last, float& prev) {
-  return extractLastTwo(doc["body"], last, prev)
-      || extractLastTwo(doc["data"]["items"], last, prev)
-      || extractLastTwo(doc["data"]["prices"], last, prev);
-}
-
-std::vector<float> extractClosesFromAnySchema(JsonDocument& doc) {
-  std::vector<float> v = extractAllCloses(doc["body"]);
-  if (!v.empty()) return v;
-  v = extractAllCloses(doc["data"]["items"]);
-  if (!v.empty()) return v;
-  return extractAllCloses(doc["data"]["prices"]);
-}
-
 }  // namespace
 
 namespace fetcher {
 
+// GET /stock/{symbol} -> { last, change_pct, closes: [...] }
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
   if (syms.empty()) return false;
-  String key = settings.apiKey();
-  if (!key.length()) {
-    log_w("no api key configured");
+  String token = settings.apiKey();
+  if (!token.length()) {
+    log_w("no api token configured");
     return false;
   }
+
+  JsonDocument filter;
+  filter["last"]       = true;
+  filter["change_pct"] = true;
+  filter["closes"]     = true;
 
   std::vector<Quote> out;
   out.reserve(syms.size());
@@ -131,26 +74,28 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
     Quote q;
     q.symbol = sym;
 
-    String url = String("https://") + cfg::RAPID_HOST + HISTORY_PATH +
-                 "?symbol=" + sym +
-                 "&interval=1d&limit=" + String(cfg::SPARKLINE_POINTS);
-
+    String url = String(cfg::API_BASE) + "/stock/" + sym;
     JsonDocument doc;
-    if (fetchAndParse(url, key, doc)) {
-      std::vector<float> closes = extractClosesFromAnySchema(doc);
-      if (closes.size() >= 2) {
-        q.last = closes.back();
-        float prev = closes[closes.size() - 2];
-        q.changePct = (prev != 0.0f) ? ((q.last - prev) / prev) * 100.0f : NAN;
-        q.fresh = !isnan(q.last) && !isnan(q.changePct);
-        q.sparkline = std::move(closes);
+    if (fetchAndParse(url, token, filter, doc)) {
+      q.last      = doc["last"]       | NAN;
+      q.changePct = doc["change_pct"] | NAN;
+      JsonArrayConst closes = doc["closes"].as<JsonArrayConst>();
+      if (!closes.isNull()) {
+        q.sparkline.reserve(closes.size());
+        for (JsonVariantConst v : closes) {
+          float c = v | NAN;
+          if (!isnan(c) && c > 0) q.sparkline.push_back(c);
+        }
+      }
+      q.fresh = !isnan(q.last) && !isnan(q.changePct);
+      if (q.fresh) {
         log_i("[%s] %.2f (%+.2f%%)", sym.c_str(), q.last, q.changePct);
       } else {
-        log_w("[%s] no valid closes in response", sym.c_str());
+        log_w("[%s] missing last/change_pct", sym.c_str());
       }
     }
     out.push_back(q);
-    vTaskDelay(pdMS_TO_TICKS(200));  // gentle on the API between calls
+    vTaskDelay(pdMS_TO_TICKS(150));  // gentle on the API between calls
   }
 
   time_t now;
@@ -159,26 +104,38 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   return true;
 }
 
+// GET /history/{symbol}?days=1 -> { points: [{ts, last}, ...] }
+// Returns minute-resolution intraday bars. We keep the last HISTORY_POINTS.
 bool fetchHistory(SettingsStore& settings, QuoteStore& store,
                   const String& symbol) {
   if (!symbol.length()) return false;
-  String key = settings.apiKey();
-  if (!key.length()) return false;
+  String token = settings.apiKey();
+  if (!token.length()) return false;
 
-  String url = String("https://") + cfg::RAPID_HOST + HISTORY_PATH +
-               "?symbol=" + symbol +
-               "&interval=1d&limit=" + String(cfg::HISTORY_POINTS);
+  JsonDocument filter;
+  filter["points"][0]["last"] = true;
 
+  String url = String(cfg::API_BASE) + "/history/" + symbol + "?days=1";
   JsonDocument doc;
-  if (!fetchAndParse(url, key, doc)) return false;
+  if (!fetchAndParse(url, token, filter, doc)) return false;
 
-  std::vector<float> closes = extractClosesFromAnySchema(doc);
-  if (closes.empty()) {
-    log_w("[%s] history: no closes", symbol.c_str());
+  JsonArrayConst pts = doc["points"].as<JsonArrayConst>();
+  if (pts.isNull() || pts.size() == 0) {
+    log_w("[%s] history: empty", symbol.c_str());
     return false;
   }
 
-  // Keep at most HISTORY_POINTS from the end (most recent).
+  std::vector<float> closes;
+  closes.reserve(pts.size());
+  for (JsonVariantConst p : pts) {
+    float v = p["last"] | NAN;
+    if (!isnan(v) && v > 0) closes.push_back(v);
+  }
+  if (closes.empty()) {
+    log_w("[%s] history: no valid points", symbol.c_str());
+    return false;
+  }
+
   if (closes.size() > cfg::HISTORY_POINTS) {
     closes.erase(closes.begin(),
                  closes.begin() + (closes.size() - cfg::HISTORY_POINTS));

@@ -8,6 +8,7 @@
 #include "display/fs_littlefs.h"
 #include "display/lgfx_cyd.hpp"
 #include "display/lvgl_bridge.h"
+#include "net/captive_portal.h"
 #include "net/quote_fetcher.h"
 #include "net/quote_store.h"
 #include "net/web_admin.h"
@@ -18,6 +19,7 @@
 #include "ui/list_screen.h"
 #include "ui/settings_screen.h"
 #include "ui/styles.h"
+#include "ui/wifi_setup_screen.h"
 
 namespace {
 
@@ -30,7 +32,9 @@ void uiTask(void*) {
   xSemaphoreTake(g_lvglMu, portMAX_DELAY);
   styles::init();
   settings_screen::init(&g_settings);
-  list_screen::build(&g_quoteStore);
+  list_screen::build(&g_quoteStore, &g_settings);
+  // Initial screen is chosen by netTask once it knows STA vs AP state;
+  // until then show a blank list screen.
   lv_screen_load(list_screen::screen());
   xSemaphoreGive(g_lvglMu);
 
@@ -42,6 +46,7 @@ void uiTask(void*) {
       list_screen::tick();
       detail_screen::tick();
       settings_screen::tick();
+      wifi_setup_screen::tick();
       lastPoll = millis();
     }
     xSemaphoreGive(g_lvglMu);
@@ -50,15 +55,35 @@ void uiTask(void*) {
 }
 
 void netTask(void*) {
-  wifi_mgr::begin(WIFI_SSID, WIFI_PASS);
+  wifi_mgr::begin(g_settings);
 
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  bool ap_mode_was = wifi_mgr::apActive();
+  if (ap_mode_was) {
+    captive_portal::begin(g_settings);
+    xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+    wifi_setup_screen::show(wifi_mgr::apSsid(), wifi_mgr::apPass());
+    xSemaphoreGive(g_lvglMu);
+  }
 
-  web_admin::begin(&g_settings);
+  bool sta_services_up = false;
+  auto bringUpStaServices = [&] {
+    if (sta_services_up) return;
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    web_admin::begin(&g_settings);
+    xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+    lv_screen_load(list_screen::screen());
+    xSemaphoreGive(g_lvglMu);
+    sta_services_up = true;
+  };
+
+  if (wifi_mgr::connected()) bringUpStaServices();
 
   uint32_t lastFetch = 0;
   for (;;) {
+    captive_portal::loop();
+
     if (wifi_mgr::connected()) {
+      bringUpStaServices();
       if (lastFetch == 0 ||
           millis() - lastFetch > g_settings.refreshSeconds() * 1000UL) {
         if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
@@ -71,6 +96,16 @@ void netTask(void*) {
       if (pending.length()) {
         fetcher::fetchHistory(g_settings, g_quoteStore, pending);
       }
+    } else if (wifi_mgr::apActive() && !ap_mode_was) {
+      // Reconnect attempt failed and we fell back to AP — re-arm the portal.
+      ap_mode_was = true;
+      captive_portal::begin(g_settings);
+      xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+      wifi_setup_screen::show(wifi_mgr::apSsid(), wifi_mgr::apPass());
+      xSemaphoreGive(g_lvglMu);
+    } else if (wifi_mgr::connected() && ap_mode_was) {
+      // STA came up after a captive-portal save.
+      ap_mode_was = false;
     }
     vTaskDelay(pdMS_TO_TICKS(250));
   }
@@ -86,7 +121,7 @@ void setup() {
   if (!LittleFS.begin(true)) {
     log_e("LittleFS mount failed");
   }
-  g_settings.begin(RAPID_KEY_SEED);
+  g_settings.begin(API_TOKEN_SEED, WIFI_SSID, WIFI_PASS);
   g_quoteStore.begin();
 
   g_gfx.init();

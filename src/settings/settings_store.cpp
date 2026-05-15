@@ -24,20 +24,29 @@ std::vector<String> split_csv(const String& s) {
 
 }  // namespace
 
-void SettingsStore::begin(const char* seedKey) {
+void SettingsStore::begin(const char* seedKey,
+                          const char* seedWifiSsid,
+                          const char* seedWifiPass) {
   _mu = xSemaphoreCreateMutex();
-  load(seedKey);
+  load(seedKey, seedWifiSsid, seedWifiPass);
 }
 
-void SettingsStore::load(const char* seedKey) {
+void SettingsStore::load(const char* seedKey,
+                         const char* seedWifiSsid,
+                         const char* seedWifiPass) {
   bool needSave = false;
-
-  if (!LittleFS.exists(cfg::SETTINGS_PATH)) {
+  auto defaults = [&] {
     _apiKey     = seedKey ? seedKey : "";
     _refresh    = cfg::DEFAULT_REFRESH_SECONDS;
     _symbolsCsv = cfg::DEFAULT_SYMBOLS;
     _adminUser  = cfg::DEFAULT_ADMIN_USER;
     _adminPass  = cfg::DEFAULT_ADMIN_PASS;
+    _wifiSsid   = seedWifiSsid ? seedWifiSsid : "";
+    _wifiPass   = seedWifiPass ? seedWifiPass : "";
+  };
+
+  if (!LittleFS.exists(cfg::SETTINGS_PATH)) {
+    defaults();
     needSave = true;
   } else {
     File f = LittleFS.open(cfg::SETTINGS_PATH, "r");
@@ -45,11 +54,7 @@ void SettingsStore::load(const char* seedKey) {
     DeserializationError err = deserializeJson(doc, f);
     f.close();
     if (err) {
-      _apiKey     = seedKey ? seedKey : "";
-      _refresh    = cfg::DEFAULT_REFRESH_SECONDS;
-      _symbolsCsv = cfg::DEFAULT_SYMBOLS;
-      _adminUser  = cfg::DEFAULT_ADMIN_USER;
-      _adminPass  = cfg::DEFAULT_ADMIN_PASS;
+      defaults();
       needSave = true;
     } else {
       _apiKey     = doc["api_key"]     | (seedKey ? seedKey : "");
@@ -57,6 +62,8 @@ void SettingsStore::load(const char* seedKey) {
       _symbolsCsv = doc["symbols"]     | cfg::DEFAULT_SYMBOLS;
       _adminUser  = doc["admin_user"]  | cfg::DEFAULT_ADMIN_USER;
       _adminPass  = doc["admin_pass"]  | cfg::DEFAULT_ADMIN_PASS;
+      _wifiSsid   = doc["wifi_ssid"]   | (seedWifiSsid ? seedWifiSsid : "");
+      _wifiPass   = doc["wifi_pass"]   | (seedWifiPass ? seedWifiPass : "");
     }
   }
 
@@ -71,6 +78,8 @@ void SettingsStore::save() const {
   doc["symbols"]    = _symbolsCsv;
   doc["admin_user"] = _adminUser;
   doc["admin_pass"] = _adminPass;
+  doc["wifi_ssid"]  = _wifiSsid;
+  doc["wifi_pass"]  = _wifiPass;
 
   File f = LittleFS.open(cfg::SETTINGS_PATH, "w");
   serializeJson(doc, f);
@@ -110,6 +119,28 @@ String SettingsStore::adminPass() const {
   String v = _adminPass;
   xSemaphoreGive(_mu);
   return v;
+}
+
+String SettingsStore::wifiSsid() const {
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  String v = _wifiSsid;
+  xSemaphoreGive(_mu);
+  return v;
+}
+
+String SettingsStore::wifiPass() const {
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  String v = _wifiPass;
+  xSemaphoreGive(_mu);
+  return v;
+}
+
+void SettingsStore::setWifi(const String& ssid, const String& pass) {
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  _wifiSsid = ssid;
+  _wifiPass = pass;
+  save();
+  xSemaphoreGive(_mu);
 }
 
 void SettingsStore::update(const String& apiKey,

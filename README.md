@@ -5,7 +5,7 @@ Stock ticker firmware for the ESP32-2432S028R "Cheap Yellow Display".
 - **Stack**: PlatformIO + Arduino-ESP32, LovyanGFX, LVGL 9.x, ArduinoJson v7, ESPAsyncWebServer.
 - **Tasks**: LVGL UI pinned to core 1, networking (WiFi + HTTPS + web admin) on core 0. UI never blocks on the network.
 - **Display**: ST7789 240×320, landscape (320×240), display inversion ON. Touch via XPT2046 on a separate SPI bus. Targets the dual-USB (USB-C + micro-USB) ESP32-2432S028R revision; the original single-micro-USB rev ships with an ILI9341 — see `src/display/lgfx_cyd.hpp` if you're on that one.
-- **Data source**: RapidAPI `yahoo-finance15.p.rapidapi.com`.
+- **Data source**: self-hosted yfinance proxy at `https://rozakos.eu/stocks/api/v1` (bearer-token auth). Repo: [Rozakos/stock-api](https://github.com/Rozakos/stock-api).
 
 ## UI tour
 
@@ -17,7 +17,7 @@ Stock ticker firmware for the ESP32-2432S028R "Cheap Yellow Display".
 ## Build & flash
 
 1. Install [PlatformIO](https://platformio.org/) (VS Code extension or CLI).
-2. Copy `src/secrets_example.h` to `src/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, and `RAPID_KEY_SEED`. `src/secrets.h` is gitignored.
+2. Copy `src/secrets_example.h` to `src/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, and `API_TOKEN_SEED` (bearer token for the stock-api). `src/secrets.h` is gitignored.
 3. `pio run -t upload` to build & flash. `pio device monitor` to watch logs.
 4. (Optional) drop PNG logos into `data/logos/<SYMBOL>.png` and run `pio run -t uploadfs` to flash the filesystem. Symbols without a PNG fall back to a brand-colored badge automatically; this folder can stay empty.
 
@@ -25,12 +25,12 @@ The default partition is `min_spiffs.csv` (1.9 MB app, OTA-capable, ~190 KB
 LittleFS). LittleFS holds the runtime settings (`/settings.json`) and the
 optional `/logos/` directory.
 
-## First-boot key seeding
+## First-boot token seeding
 
-`RAPID_KEY_SEED` in `secrets.h` is only used when no `/settings.json` exists in
-LittleFS. After first boot, the runtime key in LittleFS takes over and is
+`API_TOKEN_SEED` in `secrets.h` is only used when no `/settings.json` exists in
+LittleFS. After first boot, the runtime token in LittleFS takes over and is
 managed via the `/settings` web UI. Once the device is provisioned you can
-blank `RAPID_KEY_SEED = ""` and reflash to produce a key-free image.
+blank `API_TOKEN_SEED = ""` and reflash to produce a token-free image.
 
 If you want to re-seed, erase the filesystem:
 
@@ -52,7 +52,7 @@ Default credentials: `admin / admin` (change them in the form on first visit).
 
 The form lets you change:
 
-- RapidAPI key (leave blank to keep current)
+- API bearer token (leave blank to keep current)
 - Symbols (comma-separated, e.g. `AAPL,MSFT,NVDA`)
 - Refresh interval in seconds (minimum 15)
 - Admin username / password
@@ -81,26 +81,28 @@ Place PNGs in `data/logos/` (uppercase filename, e.g. `AAPL.png`).
 Recommended size: 48×48 or 64×64, transparent background, < ~4 KB each.
 Upload with `pio run -t uploadfs`.
 
-## RapidAPI endpoint
+## stock-api endpoints
 
-Both list and detail views use the single endpoint:
+Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
+`Authorization: Bearer <token>` and a non-empty `User-Agent`
+(`CYD-Stock-Ticker/1.0 (ESP32)`) — Cloudflare bot-fight blocks empty UAs.
 
-```
-/api/v2/markets/stock/history
-```
+- **List**: `GET /stock/{symbol}` per symbol. Response includes pre-computed
+  `last` and `change_pct` plus a `closes[]` array (up to 5 daily closes,
+  oldest→newest) used directly for the row sparkline. Server-side cached
+  10 min.
+- **Detail**: `GET /history/{symbol}?days=1` for the trend chart. Returns
+  minute-resolution `points[].last`; the firmware keeps the last
+  `HISTORY_POINTS` of them. Requires the server to have Postgres history
+  enabled (`DATABASE_URL`); otherwise the server returns 503.
 
-- **List**: per symbol, `?symbol=X&interval=1d&limit=10`. The last 10 closes
-  populate the sparkline; the last two derive `last` and `changePct`.
-- **Detail**: `?symbol=X&interval=1d&limit=30` for the 30-bar trend chart.
+The HTTP client uses `useHTTP10(true)` + `Accept-Encoding: identity` to
+avoid chunked transfer and gzip — workarounds carried over from the
+previous backend. JSON parsing uses an ArduinoJson `Filter` so the
+streamed body never lands fully in RAM.
 
-The HTTP client sets `useHTTP10(true)` and `Accept-Encoding: identity` to
-avoid chunked transfer and gzip — both have bitten this endpoint in prior
-deployments. The JSON parser uses a `close`-only filter and accepts three
-known response shapes (`body[]`, `data.items[]`, `data.prices[]`) and both
-numeric and string close values.
-
-To switch to hourly bars (if your RapidAPI subscription supports it), edit
-the `interval=1d` queries in `src/net/quote_fetcher.cpp` to `interval=1h`.
+To request a longer detail window, change `days=1` to `days=N` (1–30) in
+`src/net/quote_fetcher.cpp::fetchHistory`.
 
 ## Hardware pinout (already wired in firmware)
 
@@ -136,8 +138,10 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
 - **Touch off-center / mirrored**: tweak `x_min/x_max/y_min/y_max` in
   `lgfx_cyd.hpp` (swap min/max to invert an axis), or change touch
   `offset_rotation` to align with the LCD rotation.
-- **HTTP errors**: check serial for `HTTP <code>`. 401 = bad/missing API key;
-  404 = wrong endpoint path (see above); 429 = rate limited.
+- **HTTP errors**: check serial for `HTTP <code>`. 400 = unknown symbol
+  (not in the server's NASDAQ+NYSE allowlist); 401 = bad/missing bearer
+  token; 502 = upstream Yahoo failure with no prior cache; 503 =
+  `/history` not configured server-side.
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
 - **Logos not showing**: confirm `data/logos/<SYMBOL>.png` exists, then run
