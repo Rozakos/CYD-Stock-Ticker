@@ -138,10 +138,22 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
 - **Touch off-center / mirrored**: tweak `x_min/x_max/y_min/y_max` in
   `lgfx_cyd.hpp` (swap min/max to invert an axis), or change touch
   `offset_rotation` to align with the LCD rotation.
-- **HTTP errors**: check serial for `HTTP <code>`. 400 = unknown symbol
-  (not in the server's NASDAQ+NYSE allowlist); 401 = bad/missing bearer
-  token; 502 = upstream Yahoo failure with no prior cache; 503 =
-  `/history` not configured server-side.
+- **HTTP errors**: check serial for `HTTP <code> <url>`.
+
+  | Code | Meaning |
+  | ---- | ------- |
+  | 400  | Symbol not in the NASDAQ+NYSE allowlist (refreshed daily server-side). Add it to `EXTRA_SYMBOLS` on the server if it's a valid ticker the universe doesn't carry (crypto, indices). |
+  | 401  | Bad or missing bearer token. Rotate it via `/settings`. |
+  | 403  | Most likely the User-Agent (Cloudflare bot-fight). `cfg::API_USER_AGENT` must be set before `http.GET()` — already wired in `quote_fetcher.cpp`. |
+  | 502  | Yahoo upstream failed and the server had no cached fallback for this symbol. Usually transient; the next refresh works. |
+  | 503  | `/history` is unreachable because the server's `DATABASE_URL` isn't configured. List screen still works. |
+
+  Smoke-test from any machine to isolate device vs server:
+  ```
+  curl -H "Authorization: Bearer <token>" \
+       -H "User-Agent: stock-ticker/1.0" \
+       https://rozakos.eu/stocks/api/v1/stock/AMD
+  ```
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
 - **Logos not showing**: confirm `data/logos/<SYMBOL>.png` exists, then run
