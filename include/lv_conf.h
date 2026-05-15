@@ -5,7 +5,9 @@
 
 #define LV_USE_OS LV_OS_NONE
 
+#ifndef LV_MEM_SIZE
 #define LV_MEM_SIZE (32U * 1024U)
+#endif
 #define LV_MEM_POOL_INCLUDE <stdlib.h>
 
 #define LV_DEF_REFR_PERIOD 16

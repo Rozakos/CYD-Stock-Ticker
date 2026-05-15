@@ -4,3 +4,5 @@
 .vscode/launch.json
 .vscode/ipch
 src/secrets.h
+sim/build/
+sim/sim_data/

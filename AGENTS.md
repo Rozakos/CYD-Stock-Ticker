@@ -143,8 +143,38 @@ PIO path on Windows: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
 - **DRAM-tight links**: see the memory budget section above before adding
   fonts/widgets.
 
+## LVGL desktop simulator
+
+`sim/` is a host build that compiles the project's UI sources (`src/ui/*`,
+`quote_store`, `settings_store`) against a thin Arduino shim and an SDL2 +
+software-rendered LVGL display. Two modes:
+
+- `--window`: SDL window for interactive testing.
+- `--headless --out=foo.png`: renders a few frames and dumps a PNG. This is
+  the path Claude uses to *see* UI changes without flashing the device.
+
+Toolchain is MSYS2 + MinGW + SDL2 (see `sim/README.md`). Build with
+`cmake -S sim -B sim/build -G Ninja && cmake --build sim/build`. Run from
+`sim/build/`. The shim lives in `sim/compat/` and only covers what the
+linked-in files actually use — grow it lazily.
+
+Two sim caveats worth knowing:
+
+- **`LV_MEM_SIZE` is wrapped in `#ifndef`** in `lv_conf.h` so the sim
+  CMake can override it (sim uses 512 KB; device stays at 32 KB).
+- **PNG logos render as letter-badges in the sim only.** The LVGL FS
+  driver opens the files (verified), lodepng is linked, but the decoded
+  image doesn't appear. On-device PNG rendering is unaffected. Not yet
+  diagnosed — probably a color-format mismatch in the sim's flush path.
+
 ## Recently shipped (most recent first)
 
+- **LVGL desktop simulator** (2026-05): added `sim/` with CMake/MSYS2/SDL2
+  build that compiles the UI sources against an Arduino shim and renders
+  to either an SDL window or PNG screenshots. Headless mode lets the
+  agent verify UI changes by reading the dumped PNG instead of flashing.
+  Surfaced a real layout bug — long symbols string overflows the settings
+  screen card and overlaps the footer URL.
 - **Display driver fix for dual-USB CYD revision** (2026-05): identified
   the board as ESP32-2432S028R v2/v3 (USB-C + micro-USB), switched
   `lgfx::Panel_ILI9341` → `lgfx::Panel_ST7789` with `invert = true` in
