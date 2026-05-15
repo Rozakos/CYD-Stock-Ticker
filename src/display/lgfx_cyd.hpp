@@ -3,11 +3,12 @@
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 
-// ESP32-2432S028R "Cheap Yellow Display" — ILI9341 on HSPI, XPT2046 on VSPI.
+// ESP32-2432S028R v2/v3 (dual-USB) "Cheap Yellow Display" — ST7789 on HSPI,
+// XPT2046 on VSPI.
 // TFT:   MOSI=13 MISO=12 SCLK=14 CS=15 DC=2  RST=-1 BL=21
 // Touch: MOSI=32 MISO=39 SCLK=25 CS=33 IRQ=36
 class LGFX_CYD : public lgfx::LGFX_Device {
-  lgfx::Panel_ILI9341  _panel;
+  lgfx::Panel_ST7789   _panel;
   lgfx::Bus_SPI        _bus_tft;
   lgfx::Light_PWM      _light;
   lgfx::Touch_XPT2046  _touch;
@@ -41,7 +42,7 @@ class LGFX_CYD : public lgfx::LGFX_Device {
       cfg.offset_y         = 0;
       cfg.offset_rotation  = 0;
       cfg.readable         = false;
-      cfg.invert           = false;
+      cfg.invert           = true;
       cfg.rgb_order        = false;
       cfg.dlen_16bit       = false;
       cfg.bus_shared       = false;

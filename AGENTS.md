@@ -17,9 +17,15 @@ symbols / refresh interval.
 - **LVGL 9.5** (pulled by `lvgl @ ^9.2.2` — caret resolves up). LVGL config
   lives in `include/lv_conf.h`; the project uses `LV_CONF_INCLUDE_SIMPLE` and
   `-I include` so this file is the single source of truth.
-- **LovyanGFX 1.2.x** for ILI9341 + XPT2046. The `Touch_XPT2046` driver
-  carries its own SPI pin config in this version — there is *no*
-  `setBus()` method. See `src/display/lgfx_cyd.hpp`.
+- **LovyanGFX 1.2.x** for ST7789 + XPT2046 (dual-USB ESP32-2432S028R
+  revision; original single-micro-USB rev is ILI9341 — see "Known
+  pitfalls" below). The `Touch_XPT2046` driver carries its own SPI pin
+  config in this version — there is *no* `setBus()` method. See
+  `src/display/lgfx_cyd.hpp`.
+- **RGB565 byte order**: `LV_COLOR_16_SWAP = 0` in `lv_conf.h`, so the
+  flush callback must pass `swap = true` to `LGFX::writePixels(...)`.
+  Without it the panel renders garbage that looks like noise. See
+  `src/display/lvgl_bridge.cpp::flush_cb`.
 - **Two FreeRTOS tasks**, pinned: `uiTask` on core 1 (LVGL), `netTask` on
   core 0 (WiFi + HTTPS + web admin). They share `QuoteStore` and
   `SettingsStore` under a mutex. LVGL itself is single-threaded behind
@@ -139,6 +145,17 @@ PIO path on Windows: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
 
 ## Recently shipped (most recent first)
 
+- **Display driver fix for dual-USB CYD revision** (2026-05): identified
+  the board as ESP32-2432S028R v2/v3 (USB-C + micro-USB), switched
+  `lgfx::Panel_ILI9341` → `lgfx::Panel_ST7789` with `invert = true` in
+  `src/display/lgfx_cyd.hpp`, and added the missing RGB565 byte-swap
+  (`writePixels(..., true)`) in `src/display/lvgl_bridge.cpp` to fix
+  "scrambled noise" rendering. **Still open from that session**: touch
+  X-axis is mirrored (touching one side registers on the opposite side)
+  — fix is to swap `x_min` ↔ `x_max` in the touch config, or set the
+  touch `offset_rotation` to match. Display quality also reported as
+  "doesn't look great" so RGB order / further panel tuning may still be
+  needed.
 - On-device read-only settings info screen + gear button in status bar; wifi
   glyph is now color-coded and shows RSSI dBm.
 - Logo widget (PNG from LittleFS via custom LVGL FS driver, brand-colored

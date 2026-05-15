@@ -4,7 +4,7 @@ Stock ticker firmware for the ESP32-2432S028R "Cheap Yellow Display".
 
 - **Stack**: PlatformIO + Arduino-ESP32, LovyanGFX, LVGL 9.x, ArduinoJson v7, ESPAsyncWebServer.
 - **Tasks**: LVGL UI pinned to core 1, networking (WiFi + HTTPS + web admin) on core 0. UI never blocks on the network.
-- **Display**: ILI9341 240×320, landscape (320×240). Touch via XPT2046 on a separate SPI bus.
+- **Display**: ST7789 240×320, landscape (320×240), display inversion ON. Touch via XPT2046 on a separate SPI bus. Targets the dual-USB (USB-C + micro-USB) ESP32-2432S028R revision; the original single-micro-USB rev ships with an ILI9341 — see `src/display/lgfx_cyd.hpp` if you're on that one.
 - **Data source**: RapidAPI `yahoo-finance15.p.rapidapi.com`.
 
 ## UI tour
@@ -125,7 +125,17 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
 - **White screen, no draw**: confirm `board_build.partitions = min_spiffs.csv`
   is in effect and the build didn't run out of IRAM. Lower the SPI clock in
   `src/display/lgfx_cyd.hpp` from `40000000` to `27000000` if you see tearing.
-- **Touch off-center**: tweak `x_min/x_max/y_min/y_max` in `lgfx_cyd.hpp`.
+- **Screen is scrambled / "noise" / wrong colors**: you likely have the
+  wrong panel driver for your CYD revision. The dual-USB board uses ST7789
+  with `invert = true`; the original single-micro-USB uses `Panel_ILI9341`
+  with `invert = false`. Swap the class and the `invert` flag in
+  `src/display/lgfx_cyd.hpp`. Also confirm `flush_cb` in
+  `src/display/lvgl_bridge.cpp` is calling `writePixels(..., true)` — the
+  third arg byte-swaps RGB565 for MSB-first SPI panels (needed when
+  `LV_COLOR_16_SWAP = 0` in `include/lv_conf.h`).
+- **Touch off-center / mirrored**: tweak `x_min/x_max/y_min/y_max` in
+  `lgfx_cyd.hpp` (swap min/max to invert an axis), or change touch
+  `offset_rotation` to align with the LCD rotation.
 - **HTTP errors**: check serial for `HTTP <code>`. 401 = bad/missing API key;
   404 = wrong endpoint path (see above); 429 = rate limited.
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
