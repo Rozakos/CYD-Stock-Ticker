@@ -181,6 +181,18 @@ Two sim caveats worth knowing:
 
 ## Recently shipped (most recent first)
 
+- **Badge background fix** (2026-05): `makeBadge` in `src/ui/logos.cpp` was
+  calling `lv_obj_remove_style_all(badge)` before setting local `bg_opa` /
+  `bg_color` styles. In LVGL 9 this stripped the theme's `bg_opa=LV_OPA_COVER`
+  baseline; subsequent local `set_style_bg_opa` calls did not recover it,
+  leaving every badge background transparent (only the letters were visible).
+  Fix: remove the `lv_obj_remove_style_all` call so the theme baseline stays
+  in place. Also added `lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE)` to
+  suppress the default scroll-indicator on a plain `lv_obj_t`.
+  Sim caveat: when logo PNGs are present in `data/logos/` the PNG path is
+  taken and `makeBadge` is not called; pass `--data=/tmp` to force badge mode
+  in the sim. PNG logos do not render visually in the sim (pre-existing
+  color-format issue, on-device rendering is unaffected).
 - **WiFi captive portal + QR onboarding** (2026-05): WiFi creds are now
   stored in `/settings.json` (`wifi_ssid`/`wifi_pass`) instead of being
   compile-time constants. `wifi_mgr::begin(SettingsStore&)` tries STA;
@@ -234,8 +246,6 @@ Two sim caveats worth knowing:
 
 ## Likely next asks
 
-- Bundle some real logo PNGs in `data/logos/`. The infrastructure is in
-  place; what's missing is licensed art.
 - Long-press a row to mark it as a "favorite" / pin to top.
 - Show a tiny clock (NTP-synced) in the status bar.
 - Switch to hourly bars (`interval=1h`) on a long-press of the chart.
