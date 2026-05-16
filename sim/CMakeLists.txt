@@ -24,6 +24,7 @@ add_executable(cyd_sim
     sim_lvgl_bridge.cpp
     fake_data.cpp
     arduino_compat.cpp
+    ${PROJECT_ROOT}/src/util/interpolate.cpp
     ${PROJECT_ROOT}/src/net/quote_store.cpp
     ${PROJECT_ROOT}/src/settings/settings_store.cpp
     ${PROJECT_ROOT}/src/ui/styles.cpp

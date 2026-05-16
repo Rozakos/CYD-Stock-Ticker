@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "../config.h"
+#include "../util/interpolate.h"
 #include "../net/quote_store.h"
 #include "list_screen.h"
 #include "logos.h"
@@ -16,6 +17,8 @@ static constexpr int CHART_H     = CARD_H - 16;                   // 142
 static constexpr int Y_DIV_CNT   = 5;
 static constexpr int Y_LABEL_CNT = 3;   // label div lines 1, 2, 3 (skip edges)
 static constexpr int X_TICK_COUNT = 3;
+static constexpr int CR_FACTOR    = 5;
+static constexpr int CR_MAX_OUT   = (cfg::HISTORY_POINTS - 1) * CR_FACTOR + 1;
 
 // Month abbreviations — fixed list so we avoid locale-dependent strftime.
 // Greek requires custom font glyphs; using Latin until a Greek font is added.
@@ -204,11 +207,17 @@ void render_history(const History& h) {
   lv_coord_t chart_max = (lv_coord_t)((hi + pad) * 100);
   lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y, chart_min, chart_max);
 
+  // Catmull-Rom smooth: interpolate closes → static buffer, then feed chart.
   int n = (int)h.closes.size();
-  lv_chart_set_point_count(g_chart, n);
-  for (int i = 0; i < n; ++i) {
+  static float g_cr_buf[CR_MAX_OUT];
+  int out_n = (n > 1) ? (n - 1) * CR_FACTOR + 1 : n;
+  if (out_n > CR_MAX_OUT) out_n = CR_MAX_OUT;
+  util::catmull_rom_interpolate(h.closes.data(), n, g_cr_buf, out_n, CR_FACTOR);
+
+  lv_chart_set_point_count(g_chart, out_n);
+  for (int i = 0; i < out_n; ++i) {
     lv_chart_set_value_by_id(g_chart, g_ser, i,
-                             (lv_coord_t)(h.closes[i] * 100));
+                             (lv_coord_t)(g_cr_buf[i] * 100));
   }
   lv_chart_refresh(g_chart);
 
