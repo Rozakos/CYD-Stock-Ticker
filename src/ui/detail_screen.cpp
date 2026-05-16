@@ -206,7 +206,7 @@ void render_history(const History& h) {
            up ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, change);
   lv_label_set_text(g_change, buf);
   lv_obj_set_style_text_color(
-      g_change, up ? styles::lbl_up_color() : styles::lbl_dn_color(), 0);
+      g_change, up ? styles::up_color() : styles::dn_color(), 0);
 
   lv_color_t c = up ? styles::up_color() : styles::dn_color();
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);

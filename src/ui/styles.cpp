@@ -17,19 +17,17 @@ lv_style_t card;
 lv_style_t badge;
 lv_style_t badge_text;
 
-static lv_color_t c_up    = lv_color_hex(0xa78bfa);  // violet  — sparklines, chart, WiFi icon
-static lv_color_t c_dn    = lv_color_hex(0x60a5fa);  // sky-blue — sparklines, chart (down)
-static lv_color_t c_lbl_up = lv_color_hex(0x4ade80); // green — positive % labels
-static lv_color_t c_lbl_dn = lv_color_hex(0xf87171); // red   — negative % labels
+static lv_color_t c_up    = lv_color_hex(0x4ade80);
+static lv_color_t c_dn    = lv_color_hex(0xf87171);
 static lv_color_t c_bg    = lv_color_hex(0x0b0f17);
 static lv_color_t c_card  = lv_color_hex(0x16202d);
 static lv_color_t c_text  = lv_color_hex(0xe7eef7);
 static lv_color_t c_muted = lv_color_hex(0x8a98ad);
 
-lv_color_t up_color()     { return c_up; }
-lv_color_t dn_color()     { return c_dn; }
-lv_color_t lbl_up_color() { return c_lbl_up; }
-lv_color_t lbl_dn_color() { return c_lbl_dn; }
+lv_color_t up_color()    { return c_up; }
+lv_color_t dn_color()    { return c_dn; }
+lv_color_t lbl_up_color() { return c_up; }
+lv_color_t lbl_dn_color() { return c_dn; }
 lv_color_t bg_color()    { return c_bg; }
 lv_color_t card_color()  { return c_card; }
 lv_color_t muted_color() { return c_muted; }
@@ -98,11 +96,11 @@ void init() {
 
   lv_style_init(&pct_up);
   lv_style_set_text_font(&pct_up, &lv_font_montserrat_16);
-  lv_style_set_text_color(&pct_up, c_lbl_up);
+  lv_style_set_text_color(&pct_up, c_up);
 
   lv_style_init(&pct_dn);
   lv_style_set_text_font(&pct_dn, &lv_font_montserrat_16);
-  lv_style_set_text_color(&pct_dn, c_lbl_dn);
+  lv_style_set_text_color(&pct_dn, c_dn);
 
   lv_style_init(&muted);
   lv_style_set_text_font(&muted, &lv_font_montserrat_12);

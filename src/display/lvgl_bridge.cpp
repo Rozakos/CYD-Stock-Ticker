@@ -22,7 +22,7 @@ void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px) {
   const int32_t h = area->y2 - area->y1 + 1;
   g_gfx->startWrite();
   g_gfx->setAddrWindow(area->x1, area->y1, w, h);
-  g_gfx->writePixels(reinterpret_cast<uint16_t*>(px), w * h, true);
+  g_gfx->writePixels(reinterpret_cast<uint16_t*>(px), w * h, false);
   g_gfx->endWrite();
   lv_display_flush_ready(disp);
 }

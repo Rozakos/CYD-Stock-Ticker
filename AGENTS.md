@@ -23,9 +23,11 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
   pitfalls" below). The `Touch_XPT2046` driver carries its own SPI pin
   config in this version — there is *no* `setBus()` method. See
   `src/display/lgfx_cyd.hpp`.
-- **RGB565 byte order**: `LV_COLOR_16_SWAP = 0` in `lv_conf.h`, so the
-  flush callback must pass `swap = true` to `LGFX::writePixels(...)`.
-  Without it the panel renders garbage that looks like noise. See
+- **RGB565 byte order**: LVGL 9's `LV_COLOR_FORMAT_RGB565` (the default
+  when `LV_COLOR_DEPTH 16`) delivers pixels big-endian (MSB-first) to the
+  flush callback. Pass `swap = false` to `LGFX::writePixels(...)` so
+  LovyanGFX sends them straight to the panel. `swap = true` would
+  double-swap and produce inverted colors (green → pink). See
   `src/display/lvgl_bridge.cpp::flush_cb`.
 - **Two FreeRTOS tasks**, pinned: `uiTask` on core 1 (LVGL), `netTask` on
   core 0 (WiFi + HTTPS + web admin). They share `QuoteStore` and
