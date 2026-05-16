@@ -91,9 +91,11 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
   `last` and `change_pct` plus a `closes[]` array (up to 5 daily closes,
   oldest→newest) used directly for the row sparkline. Server-side cached
   10 min.
-- **Detail**: `GET /history/{symbol}?days=1` for the trend chart. Returns
+- **Detail**: `GET /history/{symbol}?days=2` for the trend chart. Returns
   minute-resolution `points[].last`; the firmware keeps the last
-  `HISTORY_POINTS` of them. Requires the server to have Postgres history
+  `HISTORY_POINTS` of them. We request 2 days (not 1) so the chart isn't
+  empty on weekends / outside US regular trading hours, when "today" has
+  no minute bars yet. Requires the server to have Postgres history
   enabled (`DATABASE_URL`); otherwise the server returns 503.
 
 The HTTP client uses `useHTTP10(true)` + `Accept-Encoding: identity` to

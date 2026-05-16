@@ -104,8 +104,10 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   return true;
 }
 
-// GET /history/{symbol}?days=1 -> { points: [{ts, last}, ...] }
-// Returns minute-resolution intraday bars. We keep the last HISTORY_POINTS.
+// GET /history/{symbol}?days=2 -> { points: [{ts, last}, ...] }
+// days=2 (not 1) so the chart still has data on weekends / outside US
+// regular trading hours, when "today" has no minute bars yet. We keep
+// the last HISTORY_POINTS.
 bool fetchHistory(SettingsStore& settings, QuoteStore& store,
                   const String& symbol) {
   if (!symbol.length()) return false;
@@ -115,7 +117,7 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   JsonDocument filter;
   filter["points"][0]["last"] = true;
 
-  String url = String(cfg::API_BASE) + "/history/" + symbol + "?days=1";
+  String url = String(cfg::API_BASE) + "/history/" + symbol + "?days=2";
   JsonDocument doc;
   if (!fetchAndParse(url, token, filter, doc)) return false;
 

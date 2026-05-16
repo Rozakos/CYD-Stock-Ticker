@@ -89,7 +89,7 @@ void build_once(const String& ap_ssid, const String& ap_pass) {
   lv_obj_add_style(g_status, &styles::muted, 0);
   lv_obj_set_width(g_status, LV_PCT(100));
   lv_label_set_long_mode(g_status, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(g_status, "waiting for setup…");
+  lv_label_set_text(g_status, "waiting for setup...");
 }
 
 }  // namespace
@@ -107,7 +107,7 @@ void tick() {
                           wifi_mgr::ip().c_str());
     lv_obj_set_style_text_color(g_status, styles::up_color(), 0);
   } else if (wifi_mgr::apActive()) {
-    lv_label_set_text(g_status, "waiting for setup…");
+    lv_label_set_text(g_status, "waiting for setup...");
     lv_obj_set_style_text_color(g_status, styles::muted_color(), 0);
   }
 }

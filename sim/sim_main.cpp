@@ -18,6 +18,7 @@
 #include "../src/ui/list_screen.h"
 #include "../src/ui/settings_screen.h"
 #include "../src/ui/styles.h"
+#include "../src/ui/wifi_setup_screen.h"
 
 namespace {
 
@@ -87,6 +88,8 @@ int main(int argc, char** argv) {
     detail_screen::show(&store, String(args.symbol.c_str()));
   } else if (args.screen == "settings") {
     settings_screen::show();
+  } else if (args.screen == "wifi") {
+    wifi_setup_screen::show(String("CYD-Setup-AB12"), String());
   } else {
     std::fprintf(stderr, "Unknown --screen=%s (list|detail|settings)\n", args.screen.c_str());
     return 2;
@@ -99,6 +102,7 @@ int main(int argc, char** argv) {
     if (args.screen == "list") list_screen::tick();
     if (args.screen == "detail")   detail_screen::tick();
     if (args.screen == "settings") settings_screen::tick();
+    if (args.screen == "wifi")     wifi_setup_screen::tick();
     if (!sim_bridge::tick()) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }

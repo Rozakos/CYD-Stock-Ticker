@@ -30,6 +30,8 @@ add_executable(cyd_sim
     ${PROJECT_ROOT}/src/ui/list_screen.cpp
     ${PROJECT_ROOT}/src/ui/detail_screen.cpp
     ${PROJECT_ROOT}/src/ui/settings_screen.cpp
+    ${PROJECT_ROOT}/src/ui/wifi_setup_screen.cpp
+    wifi_mgr_stub.cpp
 )
 
 target_compile_definitions(cyd_sim PRIVATE

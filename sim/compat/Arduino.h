@@ -40,6 +40,7 @@ class String {
   const char* c_str() const { return _s.c_str(); }
   size_t      length() const { return _s.size(); }
   bool        isEmpty() const { return _s.empty(); }
+  void        reserve(size_t n) { _s.reserve(n); }
   char        operator[](size_t i) const { return _s[i]; }
   char        charAt(size_t i)     const { return _s[i]; }
 
