@@ -23,12 +23,16 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
   pitfalls" below). The `Touch_XPT2046` driver carries its own SPI pin
   config in this version — there is *no* `setBus()` method. See
   `src/display/lgfx_cyd.hpp`.
-- **RGB565 byte order**: LVGL 9's `LV_COLOR_FORMAT_RGB565` (the default
-  when `LV_COLOR_DEPTH 16`) delivers pixels big-endian (MSB-first) to the
-  flush callback. Pass `swap = false` to `LGFX::writePixels(...)` so
-  LovyanGFX sends them straight to the panel. `swap = true` would
-  double-swap and produce inverted colors (green → pink). See
-  `src/display/lvgl_bridge.cpp::flush_cb`.
+- **RGB565 byte order**: `LV_COLOR_16_SWAP 0` means LVGL writes
+  little-endian RGB565 bytes to the flush buffer. Pass `swap = true` to
+  `LGFX::writePixels(...)` so LovyanGFX byte-swaps to big-endian (MSB-first)
+  before sending over SPI. Invariant: `LV_COLOR_16_SWAP=0` → `swap=true`.
+  See `src/display/lvgl_bridge.cpp::flush_cb`.
+- **ST7789 invert flag**: `cfg.invert = false` is correct for this board.
+  `invert = true` sends the ST7789 INVON command which XORs every pixel with
+  0xFFFF — producing complement colors (green → pink, red → cyan). Do NOT
+  set `invert = true` even if it seems like it might be needed; it will
+  silently invert every color channel. See `src/display/lgfx_cyd.hpp`.
 - **Two FreeRTOS tasks**, pinned: `uiTask` on core 1 (LVGL), `netTask` on
   core 0 (WiFi + HTTPS + web admin). They share `QuoteStore` and
   `SettingsStore` under a mutex. LVGL itself is single-threaded behind
@@ -208,17 +212,17 @@ Two sim caveats worth knowing:
   agent verify UI changes by reading the dumped PNG instead of flashing.
   Surfaced a real layout bug — long symbols string overflows the settings
   screen card and overlaps the footer URL.
+- **Color fix** (2026-05): `cfg.invert = false` in `lgfx_cyd.hpp` +
+  `writePixels(swap=true)` in `lvgl_bridge.cpp`. The previous `invert=true`
+  was sending the ST7789 INVON command which bit-inverted every pixel,
+  turning green into pink and red into cyan. Removing it restores correct
+  colors. Byte-swap stays `true` (`LV_COLOR_16_SWAP=0` → little-endian LVGL
+  output requires a swap to match what the ST7789 SPI interface expects).
 - **Display driver fix for dual-USB CYD revision** (2026-05): identified
   the board as ESP32-2432S028R v2/v3 (USB-C + micro-USB), switched
-  `lgfx::Panel_ILI9341` → `lgfx::Panel_ST7789` with `invert = true` in
-  `src/display/lgfx_cyd.hpp`, and added the missing RGB565 byte-swap
-  (`writePixels(..., true)`) in `src/display/lvgl_bridge.cpp` to fix
-  "scrambled noise" rendering. **Still open from that session**: touch
-  X-axis is mirrored (touching one side registers on the opposite side)
-  — fix is to swap `x_min` ↔ `x_max` in the touch config, or set the
-  touch `offset_rotation` to match. Display quality also reported as
-  "doesn't look great" so RGB order / further panel tuning may still be
-  needed.
+  `lgfx::Panel_ILI9341` → `lgfx::Panel_ST7789` in `src/display/lgfx_cyd.hpp`
+  to fix scrambled-noise rendering. Touch axes corrected by swapping
+  `x_min`/`x_max` and `y_min`/`y_max` in the XPT2046 config.
 - On-device read-only settings info screen + gear button in status bar; wifi
   glyph is now color-coded and shows RSSI dBm.
 - Logo widget (PNG from LittleFS via custom LVGL FS driver, brand-colored
