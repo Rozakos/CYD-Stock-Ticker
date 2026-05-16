@@ -132,11 +132,12 @@ void build_once() {
   lv_obj_set_style_border_width(g_chart, 0, 0);
   lv_obj_set_style_line_color(g_chart, lv_color_hex(0x2a3548), LV_PART_MAIN);
   lv_obj_set_style_line_opa(g_chart, LV_OPA_30, LV_PART_MAIN);
-  // Area fill under the line.
-  lv_obj_set_style_bg_opa(g_chart, LV_OPA_20, LV_PART_ITEMS);
+  // Vertical gradient fill: line color at top → transparent at bottom.
   lv_obj_set_style_bg_grad_dir(g_chart, LV_GRAD_DIR_VER, LV_PART_ITEMS);
-  lv_obj_set_style_bg_main_opa(g_chart, LV_OPA_30, LV_PART_ITEMS);
-  lv_obj_set_style_bg_grad_opa(g_chart, LV_OPA_0, LV_PART_ITEMS);
+  lv_obj_set_style_bg_main_stop(g_chart, 0, LV_PART_ITEMS);
+  lv_obj_set_style_bg_grad_stop(g_chart, 255, LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa(g_chart, LV_OPA_50, LV_PART_ITEMS);
+  lv_obj_set_style_bg_grad_color(g_chart, lv_color_black(), LV_PART_ITEMS);
   lv_obj_add_flag(g_chart, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   g_ser = lv_chart_add_series(g_chart, styles::up_color(),
