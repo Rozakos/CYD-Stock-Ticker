@@ -14,13 +14,13 @@ String logoPath(const String& symbol) {
 
 lv_obj_t* makeBadge(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
   lv_obj_t* badge = lv_obj_create(parent);
-  lv_obj_remove_style_all(badge);
   lv_obj_set_size(badge, size, size);
   lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(badge, styles::brand_color(symbol), 0);
   lv_obj_set_style_border_width(badge, 0, 0);
   lv_obj_set_style_pad_all(badge, 0, 0);
+  lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
 
   // 1-2 letters: keeps the badge readable at small sizes without overflowing.
   String letters = symbol;
