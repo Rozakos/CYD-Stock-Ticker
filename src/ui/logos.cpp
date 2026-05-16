@@ -2,6 +2,7 @@
 
 #include <LittleFS.h>
 
+#include "logos_data.h"
 #include "styles.h"
 
 namespace {
@@ -22,7 +23,6 @@ lv_obj_t* makeBadge(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
   lv_obj_set_style_pad_all(badge, 0, 0);
   lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
 
-  // 1-2 letters: keeps the badge readable at small sizes without overflowing.
   String letters = symbol;
   letters.toUpperCase();
   if (letters.length() > 2) letters = letters.substring(0, 2);
@@ -46,26 +46,41 @@ lv_obj_t* makeBadge(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
 namespace logos {
 
 lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
-  String path = logoPath(symbol);
-  if (!LittleFS.exists(path)) {
-    log_i("logo: %s not on LittleFS", path.c_str());
-    return makeBadge(parent, symbol, size);
+  String up = symbol;
+  up.toUpperCase();
+
+  // Preferred path: compile-time C array (ARGB8888) — bypasses LittleFS
+  // and the LVGL FS / lodepng pipeline entirely, so it renders correctly
+  // both on the device and in the desktop sim.
+  if (auto* dsc = logos_data::find(up.c_str())) {
+    lv_obj_t* img = lv_image_create(parent);
+    lv_image_set_src(img, dsc);
+    // Scale the image to the requested slot size. 256 = 1.0x.
+    if (dsc->header.w > 0) {
+      int32_t scale = (size * 256) / dsc->header.w;
+      if (scale != 256) lv_image_set_scale(img, scale);
+    }
+    lv_obj_set_size(img, size, size);
+    return img;
   }
 
-  lv_obj_t* img = lv_image_create(parent);
-  String lvPath = String("L:") + path;
-  lv_image_set_src(img, lvPath.c_str());
-  int32_t iw = lv_image_get_src_width(img);
-  int32_t ih = lv_image_get_src_height(img);
-  if (iw <= 0 || ih <= 0) {
-    log_e("logo: %s decode failed (w=%d h=%d)", path.c_str(), iw, ih);
+  // Legacy fallback: try LittleFS PNG path (kept so user-added logos via
+  // `pio run -t uploadfs` still work without a rebuild).
+  String path = logoPath(symbol);
+  if (LittleFS.exists(path)) {
+    lv_obj_t* img = lv_image_create(parent);
+    String lvPath = String("L:") + path;
+    lv_image_set_src(img, lvPath.c_str());
+    int32_t iw = lv_image_get_src_width(img);
+    int32_t ih = lv_image_get_src_height(img);
+    if (iw > 0 && ih > 0) {
+      lv_obj_set_size(img, size, size);
+      return img;
+    }
     lv_obj_delete(img);
-    return makeBadge(parent, symbol, size);
   }
-  // Render at the image's natural size — explicit `lv_image_set_scale` on
-  // this LVGL/draw-buffer combo silently produced a non-rendering widget.
-  // The PNGs are pre-sized to fit (see sim/fetch_logos.py: 48x48).
-  return img;
+
+  return makeBadge(parent, symbol, size);
 }
 
 }  // namespace logos

@@ -27,6 +27,7 @@ add_executable(cyd_sim
     ${PROJECT_ROOT}/src/settings/settings_store.cpp
     ${PROJECT_ROOT}/src/ui/styles.cpp
     ${PROJECT_ROOT}/src/ui/logos.cpp
+    ${PROJECT_ROOT}/src/ui/logos_data.cpp
     ${PROJECT_ROOT}/src/ui/list_screen.cpp
     ${PROJECT_ROOT}/src/ui/detail_screen.cpp
     ${PROJECT_ROOT}/src/ui/settings_screen.cpp
