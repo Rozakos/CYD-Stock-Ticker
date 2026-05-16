@@ -206,7 +206,7 @@ void render_history(const History& h) {
            up ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, change);
   lv_label_set_text(g_change, buf);
   lv_obj_set_style_text_color(
-      g_change, up ? styles::up_color() : styles::dn_color(), 0);
+      g_change, up ? styles::lbl_up_color() : styles::lbl_dn_color(), 0);
 
   lv_color_t c = up ? styles::up_color() : styles::dn_color();
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
@@ -250,6 +250,21 @@ void tick() {
   if (h.symbol == g_symbol && !h.closes.empty()) {
     render_history(h);
     g_rendered = true;
+    return;
+  }
+  // Fallback: while the proper minute-history is missing (market closed,
+  // history endpoint empty, etc.) draw the daily-closes sparkline from
+  // /stock so the user sees *some* trend instead of a blank panel.
+  for (const auto& q : g_store->snapshot()) {
+    if (q.symbol == g_symbol && q.sparkline.size() >= 2) {
+      History fallback;
+      fallback.symbol = q.symbol;
+      fallback.closes = q.sparkline;
+      render_history(fallback);
+      // Don't latch g_rendered — keep checking so the real minute history
+      // takes over the moment it arrives.
+      return;
+    }
   }
 }
 
