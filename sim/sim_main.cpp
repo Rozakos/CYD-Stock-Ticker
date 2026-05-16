@@ -25,10 +25,11 @@ namespace {
 struct Args {
   sim_bridge::Mode mode    = sim_bridge::Mode::Window;
   std::string      png_out;        // empty = no PNG dump
-  std::string      screen   = "list";  // list | detail | settings
+  std::string      screen   = "list";  // list | detail | settings | wifi
   std::string      symbol   = "AAPL";
   int              warmup_ticks = 10;
   std::string      data_root    = "../../data";  // host path to logos (from sim/build/)
+  std::string      click;          // "X,Y" — inject a tap after warmup
 };
 
 Args parse(int argc, char** argv) {
@@ -46,6 +47,7 @@ Args parse(int argc, char** argv) {
     else if (eat("--screen", a.screen)) {}
     else if (eat("--symbol", a.symbol)) {}
     else if (eat("--data",   a.data_root)) {}
+    else if (eat("--click",  a.click)) {}
     else {
       std::string ticks_val;
       if (eat("--ticks", ticks_val)) {
@@ -105,6 +107,28 @@ int main(int argc, char** argv) {
     if (args.screen == "wifi")     wifi_setup_screen::tick();
     if (!sim_bridge::tick()) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  if (!args.click.empty()) {
+    int cx = 0, cy = 0;
+    auto comma = args.click.find(',');
+    if (comma != std::string::npos) {
+      cx = std::atoi(args.click.substr(0, comma).c_str());
+      cy = std::atoi(args.click.substr(comma + 1).c_str());
+      std::fprintf(stderr, "[sim] inject click at %d,%d\n", cx, cy);
+      sim_bridge::inject_click(cx, cy);
+      // Tick the per-screen logic a few more times so any async fetch /
+      // state changes from the click are picked up.
+      for (int i = 0; i < 5; ++i) {
+        list_screen::tick();
+        detail_screen::tick();
+        settings_screen::tick();
+        wifi_setup_screen::tick();
+        sim_bridge::tick();
+      }
+    } else {
+      std::fprintf(stderr, "[sim] --click expects X,Y (got %s)\n", args.click.c_str());
+    }
   }
 
   if (!args.png_out.empty()) {

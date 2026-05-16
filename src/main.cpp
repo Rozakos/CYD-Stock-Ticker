@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp32-hal.h>      // disableCore0WDT
 #include <lvgl.h>
 #include <time.h>
 
@@ -42,7 +43,7 @@ void uiTask(void*) {
   for (;;) {
     xSemaphoreTake(g_lvglMu, portMAX_DELAY);
     uint32_t wait = lv_timer_handler();
-    if (millis() - lastPoll > 500) {
+    if (millis() - lastPoll > 250) {
       list_screen::tick();
       detail_screen::tick();
       settings_screen::tick();
@@ -55,6 +56,12 @@ void uiTask(void*) {
 }
 
 void netTask(void*) {
+  // HTTPS calls to rozakos.eu can block core 0 for several seconds during
+  // the TLS handshake, which starves IDLE0 and trips the task watchdog.
+  // Detaching IDLE0 from the WDT is the canonical fix for tasks that make
+  // blocking network calls outside the Arduino loop() task.
+  disableCore0WDT();
+
   wifi_mgr::begin(g_settings);
 
   bool ap_mode_was = wifi_mgr::apActive();

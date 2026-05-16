@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 
 #include "../config.h"
+#include "../display/fs_littlefs.h"
 
 namespace {
 
@@ -45,6 +46,7 @@ void SettingsStore::load(const char* seedKey,
     _wifiPass   = seedWifiPass ? seedWifiPass : "";
   };
 
+  fs_littlefs::Guard g;
   if (!LittleFS.exists(cfg::SETTINGS_PATH)) {
     defaults();
     needSave = true;
@@ -81,6 +83,7 @@ void SettingsStore::save() const {
   doc["wifi_ssid"]  = _wifiSsid;
   doc["wifi_pass"]  = _wifiPass;
 
+  fs_littlefs::Guard g;
   File f = LittleFS.open(cfg::SETTINGS_PATH, "w");
   serializeJson(doc, f);
   f.close();

@@ -168,6 +168,22 @@ bool tick() {
   return true;
 }
 
+void inject_click(int x, int y, int down_ms) {
+  g_mouse_x = x;
+  g_mouse_y = y;
+  g_mouse_down = true;
+  // Pump a few timer-handler frames so LVGL sees the press, the click event
+  // propagates, and any modal dialogs open.
+  int press_ticks = down_ms < 20 ? 1 : down_ms / 20;
+  for (int i = 0; i < press_ticks + 1; ++i) {
+    lv_timer_handler();
+  }
+  g_mouse_down = false;
+  for (int i = 0; i < 4; ++i) {
+    lv_timer_handler();
+  }
+}
+
 bool dump_png(const std::string& path) {
   // Convert RGB565 -> RGB888 then write via stb_image_write.
   std::vector<uint8_t> rgb(g_w * g_h * 3);

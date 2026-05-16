@@ -45,18 +45,21 @@ namespace logos {
 
 lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
   String path = logoPath(symbol);
-  if (LittleFS.exists(path)) {
-    lv_obj_t* img = lv_image_create(parent);
-    String lvPath = String("L:") + path;
-    lv_image_set_src(img, lvPath.c_str());
-    lv_obj_set_size(img, size, size);
-    // Scale the source to fit the slot. LVGL 9 uses 256 = 1.0x scale.
-    // We don't know the source size, so request a square scaler target via
-    // explicit image size; LVGL will use the inner_align to position it.
-    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
-    return img;
+  if (!LittleFS.exists(path)) return makeBadge(parent, symbol, size);
+
+  lv_obj_t* img = lv_image_create(parent);
+  String lvPath = String("L:") + path;
+  lv_image_set_src(img, lvPath.c_str());
+  int32_t iw = lv_image_get_src_width(img);
+  int32_t ih = lv_image_get_src_height(img);
+  if (iw <= 0 || ih <= 0) {
+    lv_obj_delete(img);
+    return makeBadge(parent, symbol, size);
   }
-  return makeBadge(parent, symbol, size);
+  // Render at the image's natural size — explicit `lv_image_set_scale` on
+  // this LVGL/draw-buffer combo silently produced a non-rendering widget.
+  // The PNGs are pre-sized to fit (see sim/fetch_logos.py: 48x48).
+  return img;
 }
 
 }  // namespace logos

@@ -18,6 +18,11 @@ bool tick();
 // Write the current framebuffer to a PNG file. Returns true on success.
 bool dump_png(const std::string& path);
 
+// Inject a synthetic touch click at the given DISPLAY coordinates (in
+// device pixels, 0..width / 0..height). Returns after `down_ms` of press
+// and a release event. Useful for scripted UI checks from sim_main.
+void inject_click(int x, int y, int down_ms = 60);
+
 void shutdown();
 
 }  // namespace sim_bridge

@@ -11,10 +11,10 @@ inline constexpr const char* API_BASE       = "https://rozakos.eu/stocks/api/v1"
 inline constexpr const char* API_USER_AGENT = "CYD-Stock-Ticker/1.0 (ESP32)";
 
 inline constexpr const char* DEFAULT_SYMBOLS =
-    "AAPL,MSFT,NVDA,TSLA,GOOG";
+    "AAPL,MSFT,NVDA,TSLA";   // 4 fits the screen without auto-scroll
 
-inline constexpr uint32_t DEFAULT_REFRESH_SECONDS = 60;
-inline constexpr uint32_t MIN_REFRESH_SECONDS     = 15;
+inline constexpr uint32_t DEFAULT_REFRESH_SECONDS = 20;
+inline constexpr uint32_t MIN_REFRESH_SECONDS     = 10;
 
 inline constexpr const char* DEFAULT_ADMIN_USER = "admin";
 inline constexpr const char* DEFAULT_ADMIN_PASS = "admin";

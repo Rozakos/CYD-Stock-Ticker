@@ -15,9 +15,9 @@
 namespace {
 
 constexpr uint16_t STATUS_H     = 22;
-constexpr uint16_t ROW_H        = 52;
+constexpr uint16_t ROW_H        = 50;   // 4 * 50 + 3 * 4 = 212 px <= 218
 constexpr uint16_t ROW_GAP      = 4;
-constexpr uint16_t LOGO_SIZE    = 40;
+constexpr uint16_t LOGO_SIZE    = 38;
 constexpr uint16_t SPARK_W      = 96;
 constexpr uint16_t SPARK_H      = 28;
 constexpr uint16_t VISIBLE_ROWS = (cfg::SCREEN_H - STATUS_H) / (ROW_H + ROW_GAP);
@@ -274,6 +274,9 @@ void build(QuoteStore* store, SettingsStore* settings) {
   lv_obj_set_style_pad_hor(g_wifi_icon, 6, 0);
   lv_obj_set_style_pad_ver(g_wifi_icon, 2, 0);
   lv_obj_add_flag(g_wifi_icon, LV_OBJ_FLAG_CLICKABLE);
+  // Expand the hit-box well beyond the small label so the tap is reachable
+  // on a 320x240 panel — touch precision is poor and the status bar is 22 px.
+  lv_obj_set_ext_click_area(g_wifi_icon, 14);
   lv_obj_add_event_cb(g_wifi_icon, on_wifi_click, LV_EVENT_CLICKED, g_settings);
 
   lv_obj_t* title = lv_label_create(bar);
@@ -290,6 +293,7 @@ void build(QuoteStore* store, SettingsStore* settings) {
   lv_obj_set_style_pad_hor(g_gear, 6, 0);
   lv_obj_set_style_pad_ver(g_gear, 2, 0);
   lv_obj_add_flag(g_gear, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(g_gear, 14);
   lv_obj_add_event_cb(g_gear, on_gear_click, LV_EVENT_CLICKED, nullptr);
 
   g_list = lv_obj_create(g_scr);

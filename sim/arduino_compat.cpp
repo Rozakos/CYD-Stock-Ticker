@@ -37,3 +37,11 @@ SerialStub   Serial;
 WiFiStub     WiFi;
 LittleFSStub LittleFS;
 EspStub      ESP;
+
+// fs_littlefs::lock/unlock stubs — the sim has no concurrent FS access so
+// no real serialization is needed. The device build links the real ones
+// from src/display/fs_littlefs.cpp.
+namespace fs_littlefs {
+void lock()   {}
+void unlock() {}
+}  // namespace fs_littlefs

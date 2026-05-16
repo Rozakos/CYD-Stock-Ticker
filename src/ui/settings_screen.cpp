@@ -59,6 +59,10 @@ void build_once() {
   lv_obj_set_style_bg_color(g_scr, styles::bg_color(), 0);
   lv_obj_set_style_bg_opa(g_scr, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(g_scr, 8, 0);
+  // Flex column so header / cards / URL stack naturally without absolute
+  // positioning — prior layout overflowed when the symbols row wrapped.
+  lv_obj_set_flex_flow(g_scr, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(g_scr, 6, 0);
   lv_obj_clear_flag(g_scr, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_scr, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(g_scr, on_tap, LV_EVENT_CLICKED, nullptr);
@@ -86,7 +90,6 @@ void build_once() {
   lv_obj_remove_style_all(net);
   lv_obj_add_style(net, &styles::card, 0);
   lv_obj_set_size(net, LV_PCT(100), LV_SIZE_CONTENT);
-  lv_obj_align(net, LV_ALIGN_TOP_LEFT, 0, 30);
   lv_obj_set_flex_flow(net, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(net, 2, 0);
   lv_obj_clear_flag(net, LV_OBJ_FLAG_SCROLLABLE);
@@ -105,7 +108,6 @@ void build_once() {
   lv_obj_remove_style_all(data);
   lv_obj_add_style(data, &styles::card, 0);
   lv_obj_set_size(data, LV_PCT(100), LV_SIZE_CONTENT);
-  lv_obj_align_to(data, net, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
   lv_obj_set_flex_flow(data, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(data, 2, 0);
   lv_obj_clear_flag(data, LV_OBJ_FLAG_SCROLLABLE);
@@ -119,10 +121,9 @@ void build_once() {
   g_syms    = add_kv(data, "Symbols");
   g_key     = add_kv(data, "API key");
 
-  // Footer with web admin URL
+  // Footer with web admin URL — sits naturally below the cards in flex flow.
   g_url = lv_label_create(g_scr);
   lv_obj_add_style(g_url, &styles::muted, 0);
-  lv_obj_align(g_url, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   lv_label_set_long_mode(g_url, LV_LABEL_LONG_DOT);
   lv_obj_set_width(g_url, LV_PCT(100));
   lv_label_set_text(g_url, "Configure at http://<ip>/");
