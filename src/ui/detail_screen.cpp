@@ -1,5 +1,7 @@
 #include "detail_screen.h"
 
+#include <time.h>
+
 #include "../config.h"
 #include "../net/quote_store.h"
 #include "list_screen.h"
@@ -7,6 +9,20 @@
 #include "styles.h"
 
 namespace {
+
+static constexpr int CARD_H      = cfg::SCREEN_H - 54 - 24 - 4;  // 158
+static constexpr int CHART_W     = cfg::SCREEN_W - 32;            // 288
+static constexpr int CHART_H     = CARD_H - 16;                   // 142
+static constexpr int Y_DIV_CNT   = 5;
+static constexpr int Y_LABEL_CNT = 3;   // label div lines 1, 2, 3 (skip edges)
+static constexpr int X_TICK_COUNT = 3;
+
+// Month abbreviations — fixed list so we avoid locale-dependent strftime.
+// Greek requires custom font glyphs; using Latin until a Greek font is added.
+static const char* kMonths[] = {
+    "Jan","Feb","Mar","Apr","May","Jun",
+    "Jul","Aug","Sep","Oct","Nov","Dec"
+};
 
 QuoteStore* g_store    = nullptr;
 String      g_symbol;
@@ -23,9 +39,8 @@ lv_obj_t* g_change     = nullptr;
 lv_obj_t* g_chart      = nullptr;
 lv_chart_series_t* g_ser = nullptr;
 lv_obj_t* g_spinner    = nullptr;
-lv_obj_t* g_hi_label   = nullptr;
-lv_obj_t* g_lo_label   = nullptr;
-lv_obj_t* g_range_label = nullptr;
+lv_obj_t* g_y_labels[Y_LABEL_CNT]  = {};
+lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
 
 void on_tap(lv_event_t*) {
   g_active = false;
@@ -94,22 +109,23 @@ void build_once() {
   lv_obj_add_style(g_change, &styles::price, 0);
   lv_label_set_text(g_change, "loading…");
 
-  // Chart card
+  // Chart card — fills available space; no stats row below
   lv_obj_t* card = lv_obj_create(g_scr);
   lv_obj_remove_style_all(card);
   lv_obj_add_style(card, &styles::card, 0);
-  lv_obj_set_size(card, cfg::SCREEN_W - 16, cfg::SCREEN_H - 54 - 24 - 4);
+  lv_obj_set_size(card, cfg::SCREEN_W - 16, CARD_H);
   lv_obj_align(card, LV_ALIGN_TOP_LEFT, 0, 56);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(card, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   g_chart = lv_chart_create(card);
-  lv_obj_set_size(g_chart, cfg::SCREEN_W - 16 - 16, 120);
+  lv_obj_set_size(g_chart, CHART_W, CHART_H);
   lv_obj_align(g_chart, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_chart_set_type(g_chart, LV_CHART_TYPE_LINE);
   lv_chart_set_point_count(g_chart, cfg::HISTORY_POINTS);
-  lv_chart_set_div_line_count(g_chart, 3, 0);
+  lv_chart_set_div_line_count(g_chart, Y_DIV_CNT, 0);
   lv_chart_set_update_mode(g_chart, LV_CHART_UPDATE_MODE_SHIFT);
+  lv_obj_set_style_pad_all(g_chart, 0, LV_PART_MAIN);
   lv_obj_set_style_size(g_chart, 0, 0, LV_PART_INDICATOR);
   lv_obj_set_style_line_width(g_chart, 2, LV_PART_ITEMS);
   lv_obj_set_style_bg_opa(g_chart, LV_OPA_TRANSP, 0);
@@ -130,38 +146,39 @@ void build_once() {
   lv_obj_set_size(g_spinner, 36, 36);
   lv_obj_center(g_spinner);
 
-  // High / Low / Range row under chart.
-  lv_obj_t* stats = lv_obj_create(card);
-  lv_obj_remove_style_all(stats);
-  lv_obj_set_size(stats, cfg::SCREEN_W - 16 - 16, 28);
-  lv_obj_align(stats, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-  lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(stats, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(stats, LV_OBJ_FLAG_EVENT_BUBBLE);
+  // Y-axis price labels inside chart at div lines 1, 2, 3
+  for (int j = 0; j < Y_LABEL_CNT; ++j) {
+    lv_obj_t* lbl = lv_label_create(g_chart);
+    lv_obj_add_style(lbl, &styles::muted, 0);
+    lv_label_set_text(lbl, "");
+    lv_obj_add_flag(lbl, LV_OBJ_FLAG_EVENT_BUBBLE);
+    int div_i = j + 1;
+    int y_px  = CHART_H * div_i / (Y_DIV_CNT - 1);
+    lv_obj_set_pos(lbl, 4, y_px - 6);  // -6 to vertically center 12px font on line
+    g_y_labels[j] = lbl;
+  }
 
-  auto add_stat = [&](const char* caption) -> lv_obj_t* {
-    lv_obj_t* col = lv_obj_create(stats);
-    lv_obj_remove_style_all(col);
-    lv_obj_set_size(col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(col, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_t* cap = lv_label_create(col);
-    lv_obj_add_style(cap, &styles::muted, 0);
-    lv_label_set_text(cap, caption);
-    lv_obj_t* val = lv_label_create(col);
-    lv_obj_add_style(val, &styles::price, 0);
-    lv_label_set_text(val, "—");
-    return val;
-  };
+  // X-axis date labels anchored at left/center/right of chart bottom
+  lv_obj_t* xl0 = lv_label_create(g_chart);
+  lv_obj_add_style(xl0, &styles::muted, 0);
+  lv_label_set_text(xl0, "");
+  lv_obj_add_flag(xl0, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_align(xl0, LV_ALIGN_BOTTOM_LEFT, 4, 0);
+  g_x_labels[0] = xl0;
 
-  g_lo_label    = add_stat("LOW");
-  g_range_label = add_stat("RANGE");
-  g_hi_label    = add_stat("HIGH");
+  lv_obj_t* xl1 = lv_label_create(g_chart);
+  lv_obj_add_style(xl1, &styles::muted, 0);
+  lv_label_set_text(xl1, "");
+  lv_obj_add_flag(xl1, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_align(xl1, LV_ALIGN_BOTTOM_MID, 0, 0);
+  g_x_labels[1] = xl1;
+
+  lv_obj_t* xl2 = lv_label_create(g_chart);
+  lv_obj_add_style(xl2, &styles::muted, 0);
+  lv_label_set_text(xl2, "");
+  lv_obj_add_flag(xl2, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_align(xl2, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
+  g_x_labels[2] = xl2;
 }
 
 void rebuild_logo(const String& symbol) {
@@ -182,18 +199,19 @@ void render_history(const History& h) {
 
   // Add 5% headroom so the line doesn't touch the edges.
   float pad = (hi - lo) * 0.05f;
-  lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y,
-                     (lv_coord_t)((lo - pad) * 100),
-                     (lv_coord_t)((hi + pad) * 100));
+  lv_coord_t chart_min = (lv_coord_t)((lo - pad) * 100);
+  lv_coord_t chart_max = (lv_coord_t)((hi + pad) * 100);
+  lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y, chart_min, chart_max);
 
-  lv_chart_set_point_count(g_chart, h.closes.size());
-  for (size_t i = 0; i < h.closes.size(); ++i) {
+  int n = (int)h.closes.size();
+  lv_chart_set_point_count(g_chart, n);
+  for (int i = 0; i < n; ++i) {
     lv_chart_set_value_by_id(g_chart, g_ser, i,
                              (lv_coord_t)(h.closes[i] * 100));
   }
   lv_chart_refresh(g_chart);
 
-  float last = h.closes.back();
+  float last  = h.closes.back();
   float first = h.closes.front();
   float change = first != 0.0f ? (last - first) / first * 100.0f : 0.0f;
   bool up = change >= 0;
@@ -212,12 +230,30 @@ void render_history(const History& h) {
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
   lv_obj_set_style_bg_color(g_chart, c, LV_PART_ITEMS);
 
-  snprintf(buf, sizeof(buf), "%.2f", hi);
-  lv_label_set_text(g_hi_label, buf);
-  snprintf(buf, sizeof(buf), "%.2f", lo);
-  lv_label_set_text(g_lo_label, buf);
-  snprintf(buf, sizeof(buf), "%.2f", hi - lo);
-  lv_label_set_text(g_range_label, buf);
+  // Y-axis price labels at div lines 1, 2, 3
+  for (int j = 0; j < Y_LABEL_CNT; ++j) {
+    int div_i = j + 1;
+    float price_val = (chart_max - (float)(chart_max - chart_min) * div_i
+                       / (Y_DIV_CNT - 1)) / 100.0f;
+    snprintf(buf, sizeof(buf), "%.1f", price_val);
+    lv_label_set_text(g_y_labels[j], buf);
+  }
+
+  // X-axis date labels: oldest, mid, newest bar (1-minute bar assumption)
+  time_t now = time(nullptr);
+  int x_indices[X_TICK_COUNT] = {0, n / 2, n - 1};
+  for (int k = 0; k < X_TICK_COUNT; ++k) {
+    int idx   = x_indices[k];
+    time_t t  = now - (time_t)(n - 1 - idx) * 60;
+    struct tm* tm_info = localtime(&t);
+    if (tm_info) {
+      snprintf(buf, sizeof(buf), "%02d %s",
+               tm_info->tm_mday, kMonths[tm_info->tm_mon]);
+    } else {
+      snprintf(buf, sizeof(buf), "--");
+    }
+    lv_label_set_text(g_x_labels[k], buf);
+  }
 }
 
 }  // namespace
@@ -233,9 +269,8 @@ void show(QuoteStore* store, const String& symbol) {
   lv_label_set_text(g_price, "—");
   lv_label_set_text(g_change, "loading…");
   lv_obj_set_style_text_color(g_change, styles::muted_color(), 0);
-  lv_label_set_text(g_hi_label, "—");
-  lv_label_set_text(g_lo_label, "—");
-  lv_label_set_text(g_range_label, "—");
+  for (int j = 0; j < Y_LABEL_CNT; ++j)  lv_label_set_text(g_y_labels[j], "");
+  for (int k = 0; k < X_TICK_COUNT; ++k) lv_label_set_text(g_x_labels[k], "");
   lv_obj_remove_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   g_store->requestHistory(symbol);

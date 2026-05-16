@@ -14,8 +14,9 @@ set(LV_BUILD_CONF_DIR ${PROJECT_ROOT}/include CACHE STRING "" FORCE)
 add_subdirectory(${LIBDEPS}/lvgl ${CMAKE_BINARY_DIR}/lvgl EXCLUDE_FROM_ALL)
 
 find_package(PkgConfig REQUIRED)
-# Use pkg-config for include + libdir but link SDL2 explicitly so we skip
-# SDL2main (which on Windows hijacks main() via SDL_main).
+# Use pkg-config for includes and libdir. Link SDL2 explicitly via linker flag
+# (-lSDL2) so we use the import library (libSDL2.dll.a) and skip SDL2main,
+# which on Windows hijacks main() via SDL_main.
 pkg_check_modules(SDL2 REQUIRED sdl2)
 
 add_executable(cyd_sim
@@ -56,5 +57,6 @@ target_link_directories(cyd_sim    PRIVATE ${SDL2_LIBRARY_DIRS})
 
 target_link_libraries(cyd_sim PRIVATE
     lvgl::lvgl
-    SDL2
+    # Use the flag form so the linker resolves libSDL2.dll.a (not SDL2.lib).
+    "-lSDL2"
 )
