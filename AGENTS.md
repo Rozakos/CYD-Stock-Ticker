@@ -185,6 +185,29 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Second chart bug-fix pass** (2026-05): three more issues from
+  visual review of the prior fix.
+  - *Cohesive area-fill polygon*: stride=1 (every interpolated point is
+    a polygon vertex) so the top edge of the fill is exactly the
+    Catmull-Rom line, not a stepped chord skipping points. Per-triangle
+    gradient stops are sampled from a single global ramp `opa_at(y) =
+    OPA_TOP * (bot - y) / bot`, so the local gradient inside each
+    trapezoid matches its neighbour's at the seam — no vertical
+    stripes or bands.
+  - *Marker label clamp + top-band rule*: right edge clamped to
+    `plot_w - 2`. If the last data point's `tip.y` lands in the top
+    `MARKER_TOP_BAND_PCT` (=15%) of the plot area, the label drops
+    BELOW the dot instead of going next to it — keeps it clear of the
+    top Y-tick label.
+  - *Y labels as chart siblings*: chart `pad_left` was unreliable
+    because chart-CHILD positions are relative to the content area,
+    which `pad_left` also shifts — labels ended up inside the plot.
+    Y and X labels are now children of the **card**, positioned in
+    card-local coords. The chart itself is sized to `(plot_w =
+    CHART_W - gutter)` × `(plot_h = CHART_H - pad_btm)` and pushed
+    right by `gutter`, so the label strips live entirely outside its
+    bounding box. The marker stays a chart child since it consumes
+    `lv_chart_get_point_pos_by_id` coords directly.
 - **Chart polish bug-fix pass** (2026-05): single follow-up commit fixing
   six visible issues from the four polish commits below.
   - *Nice-step Y ticks*: `pick_step()` picks from {0.5,1,2,5,10,20,25,50,

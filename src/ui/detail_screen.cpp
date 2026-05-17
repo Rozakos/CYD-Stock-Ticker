@@ -15,23 +15,21 @@ namespace {
 static constexpr int CARD_H      = cfg::SCREEN_H - 54 - 24 - 4;  // 158
 static constexpr int CHART_W     = cfg::SCREEN_W - 32;            // 288
 static constexpr int CHART_H     = CARD_H - 16;                   // 142
-static constexpr int Y_DIV_CNT   = 5;
-static constexpr int MAX_Y_TICKS = 8;     // pool — actual count chosen by step picker
-static constexpr int X_TICK_COUNT = 3;    // visible X ticks; rightmost dropped to clear marker
+static constexpr int MAX_Y_TICKS = 8;
+static constexpr int X_TICK_COUNT = 3;
 static constexpr int CR_FACTOR    = 5;
 static constexpr int CR_MAX_OUT   = (cfg::HISTORY_POINTS - 1) * CR_FACTOR + 1;
 static constexpr int MARKER_DOT_SIZE = 8;
+// If the last data point lands in the top N% of the plot area, drop the
+// marker label below the dot so it stays clear of the top Y-tick label.
+static constexpr int MARKER_TOP_BAND_PCT = 15;
+static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 
-// Month abbreviations — fixed list so we avoid locale-dependent strftime.
-// Latin only: LVGL's bundled Montserrat fonts don't include Greek glyphs.
 static const char* kMonths[] = {
     "Jan","Feb","Mar","Apr","May","Jun",
     "Jul","Aug","Sep","Oct","Nov","Dec"
 };
 
-// Step picker for "nice" Y-axis tick spacing. Pick the smallest step S such
-// that the data range divided by S yields at most ~5 ticks, then snap data
-// min/max outwards to the nearest multiple of S before drawing labels.
 static const float kSteps[] = {
     0.5f, 1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2000, 5000
 };
@@ -42,6 +40,7 @@ bool        g_active   = false;
 bool        g_rendered = false;
 
 lv_obj_t* g_scr        = nullptr;
+lv_obj_t* g_card       = nullptr;
 lv_obj_t* g_header     = nullptr;
 lv_obj_t* g_logo_slot  = nullptr;
 lv_obj_t* g_title      = nullptr;
@@ -55,11 +54,10 @@ lv_obj_t* g_y_labels[MAX_Y_TICKS]  = {};
 lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
 lv_obj_t* g_marker_dot   = nullptr;
 lv_obj_t* g_marker_label = nullptr;
-lv_color_t g_line_color  = lv_color_hex(0x4ade80);   // updated per render
+lv_color_t g_line_color  = lv_color_hex(0x4ade80);
 
-// Pre-computed line geometry handed to the draw callback so we never need
-// to call lv_chart_get_point_pos_by_id from inside DRAW_MAIN_BEGIN (it
-// reaches into chart-internal state that is mid-flight during draw).
+// Geometry handed to the area-fill draw callback. All chart-local
+// coordinates — the callback adds the chart's absolute (cx, cy) offset.
 int     g_fill_n          = 0;
 int32_t g_fill_x[CR_MAX_OUT];
 int32_t g_fill_y[CR_MAX_OUT];
@@ -70,12 +68,20 @@ void on_tap(lv_event_t*) {
   lv_screen_load(list_screen::screen());
 }
 
-// LVGL 9 line charts don't have a built-in area fill style — bg styles on
-// LV_PART_ITEMS only paint the line itself, leaving the area below it
-// untouched. We draw the fill manually here as a strip of vertical-gradient
-// trapezoids (split into pairs of triangles) under each line segment. The
-// handler is wired on LV_EVENT_DRAW_MAIN_BEGIN so it lands before the chart
-// class renders the line on top of our fill.
+// LVGL 9 line charts don't paint an area under the line natively. We fill
+// it manually as a chain of vertical-gradient trapezoids (split into pairs
+// of triangles) using EVERY interpolated point — stride=1 — so the top
+// edge of the polygon is exactly the Catmull-Rom line, with no chords
+// cutting across the curve.
+//
+// Each triangle's gradient stops are derived from its own bbox so the
+// per-triangle local gradient still samples the SAME global profile
+// (full opacity at chart top, transparent at chart bottom). Adjacent
+// trapezoids therefore meet with matching opacity along the seam and
+// there are no visible bands or vertical stripes.
+//
+// Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's line renders cleanly
+// on top of the fill.
 void chart_area_fill_cb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_DRAW_MAIN_BEGIN) return;
   if (g_fill_n < 2) return;
@@ -88,9 +94,23 @@ void chart_area_fill_cb(lv_event_t* e) {
 
   lv_area_t obj_coords;
   lv_obj_get_coords(chart, &obj_coords);
-  const int32_t cx = obj_coords.x1;
-  const int32_t cy = obj_coords.y1;
-  const int32_t ay_bot = cy + g_fill_bottom_y;
+  const int32_t cx     = obj_coords.x1;
+  const int32_t cy     = obj_coords.y1;
+  const int32_t bot    = g_fill_bottom_y;     // chart-local bottom y
+  const int32_t ay_bot = cy + bot;
+  if (bot <= 0) return;
+
+  // Linear ramp: line_color at full opacity (top of plot) → transparent
+  // (bottom of plot). Each triangle's stops are sampled from this so all
+  // triangles agree at any shared y.
+  auto opa_at = [&](int32_t y_local) -> lv_opa_t {
+    if (y_local <= 0)   return MARKER_OPA_TOP;
+    if (y_local >= bot) return LV_OPA_TRANSP;
+    int v = (MARKER_OPA_TOP * (bot - y_local)) / bot;
+    if (v < 0)   v = 0;
+    if (v > 255) v = 255;
+    return (lv_opa_t)v;
+  };
 
   lv_draw_triangle_dsc_t tdsc;
   lv_draw_triangle_dsc_init(&tdsc);
@@ -99,25 +119,29 @@ void chart_area_fill_cb(lv_event_t* e) {
   tdsc.grad.dir         = LV_GRAD_DIR_VER;
   tdsc.grad.stops_count = 2;
   tdsc.grad.stops[0].color = g_line_color;
-  tdsc.grad.stops[0].opa   = LV_OPA_60;
   tdsc.grad.stops[0].frac  = 0;
   tdsc.grad.stops[1].color = g_line_color;
-  tdsc.grad.stops[1].opa   = LV_OPA_TRANSP;
   tdsc.grad.stops[1].frac  = 255;
+  tdsc.grad.stops[1].opa   = opa_at(bot);   // same for every triangle's bottom stop
 
-  // Sample every Nth point so we issue ~50 trapezoids (≈100 triangles)
-  // rather than ~150. Visually indistinguishable; cheaper on the ESP32.
-  const int stride = (g_fill_n > 60) ? (g_fill_n / 50) : 1;
+  for (int i = 0; i + 1 < g_fill_n; ++i) {
+    int32_t y0 = g_fill_y[i];
+    int32_t y1 = g_fill_y[i + 1];
+    int32_t ax0 = cx + g_fill_x[i],     ay0 = cy + y0;
+    int32_t ax1 = cx + g_fill_x[i + 1], ay1 = cy + y1;
 
-  for (int i = 0; i + stride < g_fill_n; i += stride) {
-    int32_t ax0 = cx + g_fill_x[i],          ay0 = cy + g_fill_y[i];
-    int32_t ax1 = cx + g_fill_x[i + stride], ay1 = cy + g_fill_y[i + stride];
-
+    // Upper triangle: line[i], line[i+1], bottom_right. Its bbox top is
+    // the higher of the two line points.
+    int32_t t1_ytop = (y0 < y1) ? y0 : y1;
+    tdsc.grad.stops[0].opa = opa_at(t1_ytop);
     tdsc.p[0].x = ax0; tdsc.p[0].y = ay0;
     tdsc.p[1].x = ax1; tdsc.p[1].y = ay1;
     tdsc.p[2].x = ax1; tdsc.p[2].y = ay_bot;
     lv_draw_triangle(layer, &tdsc);
 
+    // Lower triangle: line[i], bottom_right, bottom_left. Its bbox top
+    // is at line[i] (single vertex above bottom row).
+    tdsc.grad.stops[0].opa = opa_at(y0);
     tdsc.p[0].x = ax0; tdsc.p[0].y = ay0;
     tdsc.p[1].x = ax1; tdsc.p[1].y = ay_bot;
     tdsc.p[2].x = ax0; tdsc.p[2].y = ay_bot;
@@ -186,20 +210,23 @@ void build_once() {
   lv_obj_add_style(g_change, &styles::price, 0);
   lv_label_set_text(g_change, "loading…");
 
-  lv_obj_t* card = lv_obj_create(g_scr);
-  lv_obj_remove_style_all(card);
-  lv_obj_add_style(card, &styles::card, 0);
-  lv_obj_set_size(card, cfg::SCREEN_W - 16, CARD_H);
-  lv_obj_align(card, LV_ALIGN_TOP_LEFT, 0, 56);
-  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(card, LV_OBJ_FLAG_EVENT_BUBBLE);
+  g_card = lv_obj_create(g_scr);
+  lv_obj_remove_style_all(g_card);
+  lv_obj_add_style(g_card, &styles::card, 0);
+  lv_obj_set_size(g_card, cfg::SCREEN_W - 16, CARD_H);
+  lv_obj_align(g_card, LV_ALIGN_TOP_LEFT, 0, 56);
+  lv_obj_clear_flag(g_card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_card, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-  g_chart = lv_chart_create(card);
+  // Chart fills the card initially; render_history shrinks it so the
+  // Y-label gutter (sibling labels on the card) can sit to the left and
+  // the X-label strip can sit below.
+  g_chart = lv_chart_create(g_card);
   lv_obj_set_size(g_chart, CHART_W, CHART_H);
   lv_obj_align(g_chart, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_chart_set_type(g_chart, LV_CHART_TYPE_LINE);
   lv_chart_set_point_count(g_chart, cfg::HISTORY_POINTS);
-  lv_chart_set_div_line_count(g_chart, Y_DIV_CNT, 0);
+  lv_chart_set_div_line_count(g_chart, 5, 0);
   lv_chart_set_update_mode(g_chart, LV_CHART_UPDATE_MODE_SHIFT);
   lv_obj_set_style_pad_all(g_chart, 0, LV_PART_MAIN);
   lv_obj_set_style_size(g_chart, 0, 0, LV_PART_INDICATOR);
@@ -215,13 +242,18 @@ void build_once() {
   g_ser = lv_chart_add_series(g_chart, styles::up_color(),
                               LV_CHART_AXIS_PRIMARY_Y);
 
-  g_spinner = lv_spinner_create(card);
+  g_spinner = lv_spinner_create(g_card);
   lv_obj_set_size(g_spinner, 36, 36);
   lv_obj_center(g_spinner);
 
-  // Y-label pool — created hidden; render_history shows the ones it needs.
+  // Y labels are children of the CARD (siblings of the chart). The
+  // chart's pad_left wasn't reliable for carving out gutter space —
+  // chart-child positions are relative to the content area, which
+  // pad_left also shifts, so the labels ended up inside the plot. As
+  // siblings positioned outside the chart's bounding box they're
+  // safe.
   for (int j = 0; j < MAX_Y_TICKS; ++j) {
-    lv_obj_t* lbl = lv_label_create(g_chart);
+    lv_obj_t* lbl = lv_label_create(g_card);
     lv_obj_add_style(lbl, &styles::muted, 0);
     lv_label_set_text(lbl, "");
     lv_obj_add_flag(lbl, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -229,18 +261,18 @@ void build_once() {
     g_y_labels[j] = lbl;
   }
 
-  // X-axis date labels — 3 of them, positions computed per-render so they
-  // line up with the tick indices [0, n/3, 2n/3]. The rightmost tick (n-1)
-  // is intentionally skipped to leave clean space for the current-price
-  // marker that always lands at the line tip.
+  // X labels are also siblings of the chart — clearer separation
+  // between plot area and the bottom strip.
   for (int k = 0; k < X_TICK_COUNT; ++k) {
-    lv_obj_t* lbl = lv_label_create(g_chart);
+    lv_obj_t* lbl = lv_label_create(g_card);
     lv_obj_add_style(lbl, &styles::muted, 0);
     lv_label_set_text(lbl, "");
     lv_obj_add_flag(lbl, LV_OBJ_FLAG_EVENT_BUBBLE);
     g_x_labels[k] = lbl;
   }
 
+  // Marker stays as a chart child so chart-local coords from
+  // lv_chart_get_point_pos_by_id position it directly.
   g_marker_dot = lv_obj_create(g_chart);
   lv_obj_remove_style_all(g_marker_dot);
   lv_obj_set_size(g_marker_dot, MARKER_DOT_SIZE, MARKER_DOT_SIZE);
@@ -263,7 +295,7 @@ void rebuild_logo(const String& symbol) {
   logos::make(g_logo_slot, symbol, 48);
 }
 
-// Pick the smallest step S from kSteps such that (range / S) <= 5, so we end
+// Pick the smallest step S from kSteps such that range / S ≤ 5, so we end
 // up with 4–6 labels. Falls back to the largest step if the range is huge.
 float pick_step(float range) {
   if (range <= 0) return 1.0f;
@@ -284,9 +316,6 @@ void render_history(const History& h) {
   }
   if (hi - lo < 0.01f) { hi = lo + 0.5f; lo -= 0.5f; }
 
-  // Snap min/max to "nice" multiples of the chosen step before labelling so
-  // the user sees round numbers (e.g. 180/185/190/195) instead of the raw
-  // data range (e.g. 180.0/183.6/187.3/190.9).
   float step    = pick_step(hi - lo);
   float lo_snap = floorf(lo / step) * step;
   float hi_snap = ceilf (hi / step) * step;
@@ -297,13 +326,12 @@ void render_history(const History& h) {
 
   lv_coord_t chart_min = (lv_coord_t)(lo_snap * 100);
   lv_coord_t chart_max = (lv_coord_t)(hi_snap * 100);
-  lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y, chart_min, chart_max);
 
-  // Render Y-tick labels first so we can measure the widest one, then size
-  // the left gutter to match. Labels for unused slots in the pool stay hidden.
+  // Pass 1: format Y labels and measure them so we know how wide to
+  // make the gutter. Pool-extra slots stay hidden.
   char buf[40];
   int widest = 0;
-  int xlabel_h = 14;   // muted Montserrat 12 line height, used as fallback
+  int label_h = 14;   // Montserrat 12 line height, used until we measure
   for (int j = 0; j < MAX_Y_TICKS; ++j) {
     lv_obj_t* lbl = g_y_labels[j];
     if (j >= n_y_ticks) {
@@ -317,33 +345,39 @@ void render_history(const History& h) {
     lv_obj_remove_flag(lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_update_layout(lbl);
     int w = lv_obj_get_width(lbl);
-    if (w > widest)  widest   = w;
+    if (w > widest)  widest  = w;
     int hh = lv_obj_get_height(lbl);
-    if (hh > xlabel_h) xlabel_h = hh;
+    if (hh > label_h) label_h = hh;
   }
 
-  // Reserve a left gutter for the Y labels and a bottom strip for the X
-  // labels so neither pair overlaps the plot area or each other.
-  int gutter   = widest   + 4;
-  int pad_btm  = xlabel_h + 2;
-  int content_h = CHART_H - pad_btm;
-  lv_obj_set_style_pad_left  (g_chart, gutter,  LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(g_chart, pad_btm, LV_PART_MAIN);
-  lv_obj_update_layout(g_chart);
+  int gutter  = widest  + 6;       // user spec: widest Y label + 6 px
+  int pad_btm = label_h + 4;       // X label strip height
+  int plot_w  = CHART_W - gutter;
+  int plot_h  = CHART_H - pad_btm;
+  if (plot_w < 1) plot_w = 1;
+  if (plot_h < 1) plot_h = 1;
 
-  // Y labels: x flush in the gutter, y maps the snapped value linearly to the
-  // (now shorter) content height so the bottom label no longer sits in the
-  // X-axis strip.
+  // Resize and reposition the chart so the gutter / bottom strip live
+  // OUTSIDE its bounding box.
+  lv_obj_set_pos(g_chart, gutter, 0);
+  lv_obj_set_size(g_chart, plot_w, plot_h);
+  lv_chart_set_range(g_chart, LV_CHART_AXIS_PRIMARY_Y, chart_min, chart_max);
+
+  // Pass 2: place Y labels in the gutter. Right-edge aligned to
+  // gutter-4 so the digits line up regardless of label width.
   for (int j = 0; j < n_y_ticks; ++j) {
-    int   lh    = lv_obj_get_height(g_y_labels[j]);
-    int   y_px  = (content_h * j) / (n_y_ticks - 1);
-    int   y_top = y_px - lh / 2;
-    if (y_top < 0)            y_top = 0;
-    if (y_top + lh > content_h) y_top = content_h - lh;
-    lv_obj_set_pos(g_y_labels[j], 0, y_top);
+    int lh = lv_obj_get_height(g_y_labels[j]);
+    int lw = lv_obj_get_width (g_y_labels[j]);
+    int y_value_px = (plot_h * j) / (n_y_ticks - 1);
+    int ly = y_value_px - lh / 2;
+    if (ly < 0)             ly = 0;
+    if (ly + lh > plot_h)   ly = plot_h - lh;
+    int lx = (gutter - 4) - lw;
+    if (lx < 0) lx = 0;
+    lv_obj_set_pos(g_y_labels[j], lx, ly);
   }
 
-  // Catmull-Rom smooth: interpolate closes → static buffer, then feed chart.
+  // Catmull-Rom smooth the close-prices, then feed the chart.
   int n = (int)h.closes.size();
   static float g_cr_buf[CR_MAX_OUT];
   int out_n = (n > 1) ? (n - 1) * CR_FACTOR + 1 : n;
@@ -356,21 +390,20 @@ void render_history(const History& h) {
                              (lv_coord_t)(g_cr_buf[i] * 100));
   }
 
-  // Precompute pixel positions for the area-fill draw callback so it never
-  // touches lv_chart_get_point_pos_by_id mid-draw (that path reads chart
-  // internal state that's in flux during DRAW_MAIN_BEGIN, and on x86 the
-  // sim trips a heap-corruption guard).
-  int content_w = CHART_W - gutter;
+  // Precompute pixel positions for the area-fill callback. Chart-local
+  // coords — no gutter offset, since the chart obj itself is at (gutter,
+  // 0) inside the card. Every interpolated point becomes a polygon
+  // vertex (stride=1).
   float span = hi_snap - lo_snap;
   if (span <= 0.0f) span = 1.0f;
   g_fill_n = out_n;
-  g_fill_bottom_y = content_h;
+  g_fill_bottom_y = plot_h;
   for (int i = 0; i < out_n; ++i) {
-    g_fill_x[i] = gutter + (content_w * i) / (out_n - 1);
+    g_fill_x[i] = (plot_w * i) / (out_n - 1);
     float ynorm = 1.0f - (g_cr_buf[i] - lo_snap) / span;
-    int   y     = (int)lroundf(ynorm * content_h);
-    if (y < 0)         y = 0;
-    if (y > content_h) y = content_h;
+    int   y     = (int)lroundf(ynorm * plot_h);
+    if (y < 0)      y = 0;
+    if (y > plot_h) y = plot_h;
     g_fill_y[i] = y;
   }
 
@@ -394,14 +427,13 @@ void render_history(const History& h) {
   g_line_color = c;
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
 
-  // X-axis labels — three ticks at indices [0, n/3, 2n/3] using each point's
-  // own epoch (h.timestamps[idx]). The rightmost (n-1) tick is intentionally
-  // omitted: the current-price marker sits there and a tick label would
-  // collide with the marker label. The chart's left content edge starts at
-  // pad_left = `gutter`; tick pixel x = gutter + idx_interp * content_w/(out_n-1).
+  // X-axis labels — three ticks at native indices [0, n/3, 2n/3] using
+  // each point's own epoch. Positioned in card-local coords below the
+  // chart. card-local x = gutter + interp_idx * plot_w / (out_n - 1).
   int n_native = n;
   int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
   time_t now = time(nullptr);
+  int card_w = CHART_W;   // card content width (card width - 2*pad_all)
   for (int k = 0; k < X_TICK_COUNT; ++k) {
     int idx_native = x_idx[k];
     if (idx_native >= n_native) idx_native = n_native - 1;
@@ -409,8 +441,6 @@ void render_history(const History& h) {
     if ((int)h.timestamps.size() == n_native && h.timestamps[idx_native] > 0) {
       t = h.timestamps[idx_native];
     } else {
-      // No per-point epoch — assume daily spacing back from now (sparkline
-      // fallback path). Never let strftime decide the format.
       t = now - (time_t)(n_native - 1 - idx_native) * 86400;
     }
     struct tm tmv;
@@ -423,21 +453,20 @@ void render_history(const History& h) {
     lv_label_set_text(g_x_labels[k], buf);
 
     int idx_interp = idx_native * CR_FACTOR;
-    int x_px       = gutter + (content_w * idx_interp) / (out_n - 1);
+    int x_px       = gutter + (plot_w * idx_interp) / (out_n - 1);
     lv_obj_update_layout(g_x_labels[k]);
     int lw = lv_obj_get_width (g_x_labels[k]);
     int lh = lv_obj_get_height(g_x_labels[k]);
     int lx = x_px - lw / 2;
-    if (lx < gutter)       lx = gutter;
-    if (lx + lw > CHART_W) lx = CHART_W - lw;
-    // X labels live in the dedicated bottom strip, just below the plot.
-    int ly = content_h + (pad_btm - lh) / 2;
-    if (ly < content_h) ly = content_h;
+    if (lx < 0)            lx = 0;
+    if (lx + lw > card_w)  lx = card_w - lw;
+    int ly = plot_h + (pad_btm - lh) / 2;
+    if (ly < plot_h)       ly = plot_h;
     lv_obj_set_pos(g_x_labels[k], lx, ly);
   }
 
-  // Current-price marker. Run after layout settles so the lookup sees the
-  // post-gutter content width.
+  // Current-price marker (chart child). lv_chart_get_point_pos_by_id
+  // returns chart-local coords so positions apply directly.
   lv_obj_set_style_bg_color(g_marker_dot, c, 0);
   lv_obj_remove_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
 
@@ -453,19 +482,32 @@ void render_history(const History& h) {
 
   lv_coord_t dot_x = tip.x - MARKER_DOT_SIZE / 2;
   lv_coord_t dot_y = tip.y - MARKER_DOT_SIZE / 2;
-  if (dot_x < gutter)                    dot_x = gutter;
-  if (dot_x > CHART_W - MARKER_DOT_SIZE) dot_x = CHART_W - MARKER_DOT_SIZE;
-  if (dot_y < 0)                            dot_y = 0;
-  if (dot_y > content_h - MARKER_DOT_SIZE)  dot_y = content_h - MARKER_DOT_SIZE;
+  if (dot_x < 0)                        dot_x = 0;
+  if (dot_x > plot_w - MARKER_DOT_SIZE) dot_x = plot_w - MARKER_DOT_SIZE;
+  if (dot_y < 0)                        dot_y = 0;
+  if (dot_y > plot_h - MARKER_DOT_SIZE) dot_y = plot_h - MARKER_DOT_SIZE;
   lv_obj_set_pos(g_marker_dot, dot_x, dot_y);
 
   lv_coord_t lw = lv_obj_get_width(g_marker_label);
   lv_coord_t lh = lv_obj_get_height(g_marker_label);
-  lv_coord_t lx = tip.x - MARKER_DOT_SIZE / 2 - lw - 4;
-  if (lx < gutter) lx = tip.x + MARKER_DOT_SIZE / 2 + 4;
-  lv_coord_t ly = tip.y - lh / 2;
+  lv_coord_t lx, ly;
+  if (tip.y < (plot_h * MARKER_TOP_BAND_PCT) / 100) {
+    // Tip is high in the chart — placing the label next to the dot
+    // would collide with the topmost Y tick. Drop it under the dot.
+    lx = tip.x - lw / 2;
+    ly = tip.y + MARKER_DOT_SIZE / 2 + 2;
+  } else {
+    // Default: to the left of the dot, vertically centred. Flip to
+    // the right only if the left placement would leave the chart.
+    lx = tip.x - MARKER_DOT_SIZE / 2 - lw - 4;
+    if (lx < 0) lx = tip.x + MARKER_DOT_SIZE / 2 + 4;
+    ly = tip.y - lh / 2;
+  }
+  // User spec: right edge ≤ chart_right - 2 px.
+  if (lx + lw > plot_w - 2) lx = plot_w - 2 - lw;
+  if (lx < 0)             lx = 0;
   if (ly < 0)             ly = 0;
-  if (ly + lh > content_h) ly = content_h - lh;
+  if (ly + lh > plot_h)   ly = plot_h - lh;
   lv_obj_set_pos(g_marker_label, lx, ly);
 }
 
@@ -490,7 +532,7 @@ void show(QuoteStore* store, const String& symbol) {
   lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
   lv_obj_remove_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
-  g_fill_n = 0;  // suppress area-fill draw until new data is ready
+  g_fill_n = 0;
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   g_store->requestHistory(symbol);
   g_active = true;
@@ -511,7 +553,6 @@ void tick() {
       History fallback;
       fallback.symbol = q.symbol;
       fallback.closes = q.sparkline;
-      // No timestamps — render_history falls back to one-day spacing.
       render_history(fallback);
       return;
     }

@@ -143,9 +143,14 @@ int main(int argc, char** argv) {
     using clock = std::chrono::steady_clock;
     auto next = clock::now();
     while (sim_bridge::tick()) {
-      list_screen::tick();
-      detail_screen::tick();
-      settings_screen::tick();
+      // Only tick the active screen — list_screen::tick segfaults inside
+      // its row-rebuild path when the list isn't currently loaded
+      // (sim/README.md "Known issues"). The warmup loop above already
+      // gates this; the main loop has to as well.
+      if      (args.screen == "list")     list_screen::tick();
+      else if (args.screen == "detail")   detail_screen::tick();
+      else if (args.screen == "settings") settings_screen::tick();
+      else if (args.screen == "wifi")     wifi_setup_screen::tick();
       next += std::chrono::milliseconds(16);
       std::this_thread::sleep_until(next);
     }
