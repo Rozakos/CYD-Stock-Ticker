@@ -381,12 +381,13 @@ void render_history(const History& h) {
     lv_obj_set_pos(g_y_labels[j], lx, ly);
   }
 
-  // Catmull-Rom smooth the close-prices, then feed the chart.
+  // Monotone cubic Hermite smooth (PCHIP) — kills the wiggles/overshoot
+  // that uniform Catmull-Rom was producing on noisy daily close series.
   int n = (int)h.closes.size();
   static float g_cr_buf[CR_MAX_OUT];
   int out_n = (n > 1) ? (n - 1) * CR_FACTOR + 1 : n;
   if (out_n > CR_MAX_OUT) out_n = CR_MAX_OUT;
-  util::catmull_rom_interpolate(h.closes.data(), n, g_cr_buf, out_n, CR_FACTOR);
+  util::monotone_cubic_interpolate(h.closes.data(), n, g_cr_buf, out_n, CR_FACTOR);
 
   lv_chart_set_point_count(g_chart, out_n);
   for (int i = 0; i < out_n; ++i) {

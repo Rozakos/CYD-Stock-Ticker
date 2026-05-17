@@ -185,6 +185,26 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Chart fill rewrite + PCHIP** (2026-05): two follow-up commits.
+  - *Single-gradient area fill* (`7a4a85b`): the per-trapezoid
+    gradients with bbox-scaled stops still produced visible vertical
+    striping because LVGL's renderer quantises opacity per-column at
+    trapezoid seams. Replaced with **one** `lv_draw_rect` covering
+    the whole plot area (line_color @ top → transparent @ bottom)
+    plus N solid-color "erase" trapezoids in the card's bg color
+    above the line. One gradient, one continuous interpolation, no
+    seams.
+  - *PCHIP / Fritsch-Carlson interpolation*: replaced uniform
+    Catmull-Rom with monotone cubic Hermite. Tangents at sign
+    changes between adjacent secants are clamped to 0, and the
+    Fritsch-Carlson α²+β²≤9 constraint guarantees no overshoot or
+    undershoot on monotonic runs — kills the wiggles on noisy
+    daily-close series. Function renamed to
+    `util::monotone_cubic_interpolate`; same input/output API
+    (factor=5, `(n-1)*factor+1` outputs). Unit tests at
+    `test/test_native/` extended with monotonicity assertions on
+    both increasing and decreasing inputs, plus a line-exact check.
+    Static slope/secant buffers add ~2 KB DRAM (RAM 35.4% → 36.0%).
 - **Second chart bug-fix pass** (2026-05): three more issues from
   visual review of the prior fix.
   - *Cohesive area-fill polygon*: stride=1 (every interpolated point is
