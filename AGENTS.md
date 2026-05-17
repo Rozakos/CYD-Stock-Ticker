@@ -51,7 +51,7 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 34.7%**, **Flash 78.8%**. DRAM is the constraint when
+Last clean build: **RAM 34.9%**, **Flash 94.0%**. DRAM is the constraint when
 adding LVGL features. Two main levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
@@ -185,7 +185,7 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
-- **Detail chart polish — three commits** (2026-05):
+- **Detail chart polish — four commits** (2026-05):
   1. *Axis labels + grid* (`73f0a04`): Y-axis price labels at div lines 1/2/3
      (left edge, `styles::muted`); X-axis "DD MMM" date labels (Latin months,
      fixed table, no strftime) anchored at bottom-left / bottom-center /
@@ -202,6 +202,15 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
      (30 pts) → ~146 smoothed points fed to the chart. Unit tests at
      `test/test_native/` pass via `pio test -e native` (needs MSYS2 gcc on
      PATH). `[env:native]` added to `platformio.ini`.
+  4. *Current-price marker*: 8 px filled circle (`lv_obj`, `LV_RADIUS_CIRCLE`)
+     + price label, both as chart children. Positioned via
+     `lv_chart_get_point_pos_by_id(g_chart, g_ser, out_n-1, &tip)`. Must call
+     `lv_obj_update_layout(g_chart)` before the lookup (the chart's content
+     width is otherwise stale) AND un-hide the label before reading its
+     size. Dot is clamped inside `[0, CHART_W-8] × [0, CHART_H-8]` so the
+     right-edge "latest point" case doesn't render a half-circle clipped
+     against the chart border. Label sits to the left of the dot by
+     default, flips to the right only when there isn't room on the left.
 - **Sim SDL2 link fix** (2026-05): cmake 4.x resolves bare `SDL2` to
   `SDL2.lib` (Windows import lib, does not exist); fixed by linking with
   the flag form `"-lSDL2"` so ld uses `libSDL2.dll.a`.  Must build the sim

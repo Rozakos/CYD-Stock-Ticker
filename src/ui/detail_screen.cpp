@@ -44,6 +44,10 @@ lv_chart_series_t* g_ser = nullptr;
 lv_obj_t* g_spinner    = nullptr;
 lv_obj_t* g_y_labels[Y_LABEL_CNT]  = {};
 lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
+lv_obj_t* g_marker_dot   = nullptr;   // small filled circle at last data point
+lv_obj_t* g_marker_label = nullptr;   // price label next to the dot
+
+static constexpr int MARKER_DOT_SIZE = 8;   // px diameter, matches LVGL 9 rounding
 
 void on_tap(lv_event_t*) {
   g_active = false;
@@ -183,6 +187,25 @@ void build_once() {
   lv_obj_add_flag(xl2, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_align(xl2, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
   g_x_labels[2] = xl2;
+
+  // Current-price marker: small filled circle at the latest point + label
+  // next to it. Both are chart-local children so chart-local coords from
+  // lv_chart_get_point_pos_by_id apply directly. Hidden until data arrives.
+  g_marker_dot = lv_obj_create(g_chart);
+  lv_obj_remove_style_all(g_marker_dot);
+  lv_obj_set_size(g_marker_dot, MARKER_DOT_SIZE, MARKER_DOT_SIZE);
+  lv_obj_set_style_radius(g_marker_dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(g_marker_dot, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(g_marker_dot, 0, 0);
+  lv_obj_clear_flag(g_marker_dot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
+
+  g_marker_label = lv_label_create(g_chart);
+  lv_obj_add_style(g_marker_label, &styles::price, 0);
+  lv_label_set_text(g_marker_label, "");
+  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 void rebuild_logo(const String& symbol) {
@@ -240,6 +263,46 @@ void render_history(const History& h) {
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
   lv_obj_set_style_bg_color(g_chart, c, LV_PART_ITEMS);
 
+  // Current-price marker at the last interpolated point. Both children must
+  // be visible *before* asking for their size, and the chart needs a fresh
+  // layout pass so lv_chart_get_point_pos_by_id sees the right content
+  // dimensions. Recompute every refresh so resize / data updates keep the
+  // marker glued to the line tip.
+  lv_obj_set_style_bg_color(g_marker_dot, c, 0);
+  lv_obj_remove_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
+
+  char tip_buf[16];
+  snprintf(tip_buf, sizeof(tip_buf), "%.2f", last);
+  lv_label_set_text(g_marker_label, tip_buf);
+  lv_obj_set_style_text_color(g_marker_label, c, 0);
+  lv_obj_remove_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_update_layout(g_chart);
+  lv_point_t tip;
+  lv_chart_get_point_pos_by_id(g_chart, g_ser, out_n - 1, &tip);
+
+  // Clamp dot fully inside the chart so the right-edge case doesn't show a
+  // half-circle clipped against the chart border.
+  lv_coord_t dot_x = tip.x - MARKER_DOT_SIZE / 2;
+  lv_coord_t dot_y = tip.y - MARKER_DOT_SIZE / 2;
+  if (dot_x < 0)                    dot_x = 0;
+  if (dot_x > CHART_W - MARKER_DOT_SIZE) dot_x = CHART_W - MARKER_DOT_SIZE;
+  if (dot_y < 0)                    dot_y = 0;
+  if (dot_y > CHART_H - MARKER_DOT_SIZE) dot_y = CHART_H - MARKER_DOT_SIZE;
+  lv_obj_set_pos(g_marker_dot, dot_x, dot_y);
+
+  // Default placement: to the left of the dot, vertically centred. Switch to
+  // the right side if the dot is already near the right edge so the label
+  // never gets clipped (true for the very common "latest point" case).
+  lv_coord_t lw = lv_obj_get_width(g_marker_label);
+  lv_coord_t lh = lv_obj_get_height(g_marker_label);
+  lv_coord_t lx = tip.x - MARKER_DOT_SIZE / 2 - lw - 4;
+  if (lx < 2) lx = tip.x + MARKER_DOT_SIZE / 2 + 4;
+  lv_coord_t ly = tip.y - lh / 2;
+  if (ly < 0) ly = 0;
+  if (ly + lh > CHART_H) ly = CHART_H - lh;
+  lv_obj_set_pos(g_marker_label, lx, ly);
+
   // Y-axis price labels at div lines 1, 2, 3
   for (int j = 0; j < Y_LABEL_CNT; ++j) {
     int div_i = j + 1;
@@ -281,6 +344,8 @@ void show(QuoteStore* store, const String& symbol) {
   lv_obj_set_style_text_color(g_change, styles::muted_color(), 0);
   for (int j = 0; j < Y_LABEL_CNT; ++j)  lv_label_set_text(g_y_labels[j], "");
   for (int k = 0; k < X_TICK_COUNT; ++k) lv_label_set_text(g_x_labels[k], "");
+  lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
   lv_obj_remove_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   g_store->requestHistory(symbol);
