@@ -30,6 +30,7 @@ struct Args {
   int              warmup_ticks = 10;
   std::string      data_root    = "../../data";  // host path to logos (from sim/build/)
   std::string      click;          // "X,Y" — inject a tap after warmup
+  bool             intraday = false;   // override history with intraday data
 };
 
 Args parse(int argc, char** argv) {
@@ -48,6 +49,7 @@ Args parse(int argc, char** argv) {
     else if (eat("--symbol", a.symbol)) {}
     else if (eat("--data",   a.data_root)) {}
     else if (eat("--click",  a.click)) {}
+    else if (s == "--intraday") a.intraday = true;
     else {
       std::string ticks_val;
       if (eat("--ticks", ticks_val)) {
@@ -78,6 +80,7 @@ int main(int argc, char** argv) {
   settings.begin("");  // empty seed key; sim doesn't fetch.
 
   fake_data::seed(store);
+  if (args.intraday) fake_data::seed_intraday(store, args.symbol.c_str());
 
   styles::init();
   settings_screen::init(&settings);
@@ -118,12 +121,13 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "[sim] inject click at %d,%d\n", cx, cy);
       sim_bridge::inject_click(cx, cy);
       // Tick the per-screen logic a few more times so any async fetch /
-      // state changes from the click are picked up.
+      // state changes from the click are picked up. Gate by the active
+      // screen — list_screen::tick segfaults when the list isn't loaded.
       for (int i = 0; i < 5; ++i) {
-        list_screen::tick();
-        detail_screen::tick();
-        settings_screen::tick();
-        wifi_setup_screen::tick();
+        if      (args.screen == "list")     list_screen::tick();
+        else if (args.screen == "detail")   detail_screen::tick();
+        else if (args.screen == "settings") settings_screen::tick();
+        else if (args.screen == "wifi")     wifi_setup_screen::tick();
         sim_bridge::tick();
       }
     } else {

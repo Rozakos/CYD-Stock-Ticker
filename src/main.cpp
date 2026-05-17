@@ -99,9 +99,10 @@ void netTask(void*) {
           lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 5000;
         }
       }
-      String pending = g_quoteStore.takePendingHistory();
-      if (pending.length()) {
-        fetcher::fetchHistory(g_settings, g_quoteStore, pending);
+      HistoryRequest hr;
+      if (g_quoteStore.takePendingHistory(hr)) {
+        fetcher::fetchHistory(g_settings, g_quoteStore,
+                              hr.symbol, hr.range, hr.gen);
       }
     } else if (wifi_mgr::apActive() && !ap_mode_was) {
       // Reconnect attempt failed and we fell back to AP — re-arm the portal.

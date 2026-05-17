@@ -104,27 +104,42 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   return true;
 }
 
-// GET /history/{symbol}?days=2 -> { points: [{ts, last}, ...] }
-// days=2 (not 1) so the chart still has data on weekends / outside US
-// regular trading hours, when "today" has no minute bars yet. We keep
-// the last HISTORY_POINTS.
+// GET /history/{symbol}?range=<value> ->
+//   { interval: "intraday"|"daily", points: [{ts, last}, ...] }
+//
+// The caller (UI) passes the generation id from QuoteStore::requestHistory
+// and we re-check it right before storing — that's how a tap on a
+// different range button cancels this fetch even though we can't
+// interrupt the blocking HTTPS read mid-flight.
 bool fetchHistory(SettingsStore& settings, QuoteStore& store,
-                  const String& symbol) {
+                  const String& symbol, const String& range,
+                  uint32_t gen) {
   if (!symbol.length()) return false;
   String token = settings.apiKey();
   if (!token.length()) return false;
 
   JsonDocument filter;
+  filter["interval"]          = true;
   filter["points"][0]["last"] = true;
   filter["points"][0]["ts"]   = true;
 
-  String url = String(cfg::API_BASE) + "/history/" + symbol + "?days=2";
+  String url = String(cfg::API_BASE) + "/history/" + symbol + "?range=" + range;
   JsonDocument doc;
-  if (!fetchAndParse(url, token, filter, doc)) return false;
+  if (!fetchAndParse(url, token, filter, doc)) {
+    if (store.historyGenCurrent(gen)) store.setHistoryError(true);
+    return false;
+  }
 
+  // If a newer request was issued while we were blocked on the HTTPS
+  // round-trip, drop this result on the floor — the next loop iteration
+  // will pick up the newer request.
+  if (!store.historyGenCurrent(gen)) return false;
+
+  String interval = doc["interval"] | "";
   JsonArrayConst pts = doc["points"].as<JsonArrayConst>();
   if (pts.isNull() || pts.size() == 0) {
     log_w("[%s] history: empty", symbol.c_str());
+    store.setHistoryError(true);
     return false;
   }
 
@@ -141,6 +156,7 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   }
   if (closes.empty()) {
     log_w("[%s] history: no valid points", symbol.c_str());
+    store.setHistoryError(true);
     return false;
   }
 
@@ -152,9 +168,12 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
 
   History h;
   h.symbol     = symbol;
+  h.interval   = interval;
   h.closes     = std::move(closes);
   h.timestamps = std::move(timestamps);
+  if (!store.historyGenCurrent(gen)) return false;
   store.setHistory(std::move(h));
+  store.setHistoryError(false);
   return true;
 }
 

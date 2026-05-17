@@ -12,9 +12,16 @@
 
 namespace {
 
-static constexpr int CARD_H      = cfg::SCREEN_H - 54 - 24 - 4;  // 158
-static constexpr int CHART_W     = cfg::SCREEN_W - 32;            // 288
-static constexpr int CHART_H     = CARD_H - 16;                   // 142
+// Compact single-line header (logo + symbol + price + change) lets us
+// squeeze the 24 px range-button row in between header and chart on the
+// 320×240 panel — anything taller and the chart drops below ~140 px.
+static constexpr int HEADER_H    = 36;
+static constexpr int LOGO_SIZE   = 32;
+static constexpr int BTN_ROW_H   = 24;
+static constexpr int CARD_Y      = HEADER_H + 2 + BTN_ROW_H + 2;             // 64
+static constexpr int CARD_H      = cfg::SCREEN_H - 16 - CARD_Y;              // 160
+static constexpr int CHART_W     = cfg::SCREEN_W - 32;                        // 288
+static constexpr int CHART_H     = CARD_H - 16;                               // 144
 static constexpr int MAX_Y_TICKS = 8;
 static constexpr int X_TICK_COUNT = 3;
 static constexpr int CR_FACTOR    = 5;
@@ -24,6 +31,18 @@ static constexpr int MARKER_DOT_SIZE = 8;
 // marker label below the dot so it stays clear of the top Y-tick label.
 static constexpr int MARKER_TOP_BAND_PCT = 15;
 static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
+
+// Range buttons. Button index → API range token. The label seen on the
+// btnmatrix is `g_range_labels[]`; the value sent in `?range=` is
+// `g_range_api[]`. Keep both arrays in lock-step.
+static constexpr int kNumRanges       = 5;
+static constexpr int kDefaultRangeIdx = 3;     // "1M"
+static const char* g_range_labels[] = {
+    "1D", "5D", "1W", "1M", "6M", ""    // trailing "" terminates lv_buttonmatrix map
+};
+static const char* g_range_api[kNumRanges] = {
+    "1d", "5d", "1w", "1mo", "6mo"
+};
 
 static const char* kMonths[] = {
     "Jan","Feb","Mar","Apr","May","Jun",
@@ -36,8 +55,11 @@ static const float kSteps[] = {
 
 QuoteStore* g_store    = nullptr;
 String      g_symbol;
-bool        g_active   = false;
-bool        g_rendered = false;
+bool        g_active     = false;
+bool        g_rendered   = false;
+bool        g_loading    = false;
+bool        g_showed_err = false;
+int         g_range_idx  = kDefaultRangeIdx;
 
 lv_obj_t* g_scr        = nullptr;
 lv_obj_t* g_card       = nullptr;
@@ -47,9 +69,11 @@ lv_obj_t* g_title      = nullptr;
 lv_obj_t* g_back_hint  = nullptr;
 lv_obj_t* g_price      = nullptr;
 lv_obj_t* g_change     = nullptr;
+lv_obj_t* g_btn_row    = nullptr;
 lv_obj_t* g_chart      = nullptr;
 lv_chart_series_t* g_ser = nullptr;
 lv_obj_t* g_spinner    = nullptr;
+lv_obj_t* g_err_label  = nullptr;
 lv_obj_t* g_y_labels[MAX_Y_TICKS]  = {};
 lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
 lv_obj_t* g_marker_dot   = nullptr;
@@ -66,6 +90,32 @@ int32_t g_fill_bottom_y   = 0;
 void on_tap(lv_event_t*) {
   g_active = false;
   lv_screen_load(list_screen::screen());
+}
+
+void start_history_fetch();   // forward decl — used by on_range_clicked
+
+void on_range_clicked(lv_event_t* e) {
+  lv_obj_t* btns = (lv_obj_t*)lv_event_get_target(e);
+  uint32_t idx = lv_buttonmatrix_get_selected_button(btns);
+  if (idx >= (uint32_t)kNumRanges) return;
+  if ((int)idx == g_range_idx) return;
+  g_range_idx = (int)idx;
+  start_history_fetch();
+}
+
+void start_history_fetch() {
+  if (!g_store || !g_symbol.length()) return;
+  g_loading    = true;
+  g_showed_err = false;
+  g_rendered   = false;
+  if (g_spinner)   lv_obj_remove_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
+  if (g_err_label) lv_obj_add_flag   (g_err_label, LV_OBJ_FLAG_HIDDEN);
+  // Hide the marker / fill data while the new range loads so we don't
+  // briefly render stale labels at the old data's coordinates.
+  if (g_marker_dot)   lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
+  if (g_marker_label) lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
+  g_fill_n = 0;
+  g_store->requestHistory(g_symbol, g_range_api[g_range_idx]);
 }
 
 // Area-fill rasterizer. Previous attempts used per-segment trapezoids
@@ -190,62 +240,81 @@ void build_once() {
   lv_obj_add_flag(g_scr, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(g_scr, on_tap, LV_EVENT_CLICKED, nullptr);
 
+  // Compact single-row header: [logo] [symbol] [price] (flex grow) [chg %] [back hint]
   g_header = lv_obj_create(g_scr);
   lv_obj_remove_style_all(g_header);
-  lv_obj_set_size(g_header, cfg::SCREEN_W - 16, 54);
+  lv_obj_set_size(g_header, cfg::SCREEN_W - 16, HEADER_H);
   lv_obj_align(g_header, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_obj_set_flex_flow(g_header, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(g_header, LV_FLEX_ALIGN_START,
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(g_header, 8, 0);
+  lv_obj_set_style_pad_column(g_header, 6, 0);
   lv_obj_clear_flag(g_header, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_header, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   g_logo_slot = lv_obj_create(g_header);
   lv_obj_remove_style_all(g_logo_slot);
-  lv_obj_set_size(g_logo_slot, 48, 48);
+  lv_obj_set_size(g_logo_slot, LOGO_SIZE, LOGO_SIZE);
   lv_obj_clear_flag(g_logo_slot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_logo_slot, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-  lv_obj_t* title_col = lv_obj_create(g_header);
-  lv_obj_remove_style_all(title_col);
-  lv_obj_set_size(title_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_flex_grow(title_col, 1);
-  lv_obj_set_flex_flow(title_col, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(title_col, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-  lv_obj_clear_flag(title_col, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(title_col, LV_OBJ_FLAG_EVENT_BUBBLE);
+  g_title = lv_label_create(g_header);
+  lv_obj_add_style(g_title, &styles::sym_small, 0);
 
-  g_title = lv_label_create(title_col);
-  lv_obj_add_style(g_title, &styles::sym, 0);
-
-  g_price = lv_label_create(title_col);
-  lv_obj_add_style(g_price, &styles::price_big, 0);
+  g_price = lv_label_create(g_header);
+  lv_obj_add_style(g_price, &styles::price, 0);
   lv_label_set_text(g_price, "—");
 
-  lv_obj_t* right_col = lv_obj_create(g_header);
-  lv_obj_remove_style_all(right_col);
-  lv_obj_set_size(right_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(right_col, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(right_col, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-  lv_obj_clear_flag(right_col, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(right_col, LV_OBJ_FLAG_EVENT_BUBBLE);
+  g_change = lv_label_create(g_header);
+  lv_obj_add_style(g_change, &styles::price, 0);
+  lv_label_set_text(g_change, "loading…");
 
-  g_back_hint = lv_label_create(right_col);
+  g_back_hint = lv_label_create(g_header);
   lv_obj_add_style(g_back_hint, &styles::muted, 0);
   lv_label_set_text(g_back_hint, LV_SYMBOL_LEFT " tap");
 
-  g_change = lv_label_create(right_col);
-  lv_obj_add_style(g_change, &styles::price, 0);
-  lv_label_set_text(g_change, "loading…");
+  // Range button matrix lives between header and card.
+  static const char* range_map[] = {
+      g_range_labels[0], g_range_labels[1], g_range_labels[2],
+      g_range_labels[3], g_range_labels[4], ""
+  };
+  g_btn_row = lv_buttonmatrix_create(g_scr);
+  lv_buttonmatrix_set_map(g_btn_row, range_map);
+  lv_buttonmatrix_set_one_checked(g_btn_row, true);
+  for (int i = 0; i < kNumRanges; ++i) {
+    lv_buttonmatrix_set_button_ctrl(g_btn_row, i, LV_BUTTONMATRIX_CTRL_CHECKABLE);
+  }
+  lv_buttonmatrix_set_button_ctrl(g_btn_row, kDefaultRangeIdx,
+                                  LV_BUTTONMATRIX_CTRL_CHECKED);
+  lv_obj_set_size(g_btn_row, cfg::SCREEN_W - 16, BTN_ROW_H);
+  lv_obj_align(g_btn_row, LV_ALIGN_TOP_LEFT, 0, HEADER_H + 2);
+  lv_obj_set_style_pad_all(g_btn_row, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(g_btn_row, 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(g_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(g_btn_row, 0, LV_PART_MAIN);
+  // Inactive button styling.
+  lv_obj_set_style_bg_color(g_btn_row, lv_color_hex(0x2a3548), LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa  (g_btn_row, LV_OPA_COVER,            LV_PART_ITEMS);
+  lv_obj_set_style_radius  (g_btn_row, 4,                       LV_PART_ITEMS);
+  lv_obj_set_style_text_color(g_btn_row, lv_color_hex(0xe7eef7),   LV_PART_ITEMS);
+  lv_obj_set_style_text_font (g_btn_row, &lv_font_montserrat_12,    LV_PART_ITEMS);
+  lv_obj_set_style_border_width(g_btn_row, 0,                      LV_PART_ITEMS);
+  // Active (checked) styling. Bg color is refreshed in render_history
+  // to follow the up/down accent.
+  lv_obj_set_style_bg_color(g_btn_row, styles::up_color(),
+                            (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_set_style_bg_opa  (g_btn_row, LV_OPA_80,
+                            (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_set_style_text_color(g_btn_row, lv_color_hex(0x0b0f17),
+                              (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_add_event_cb(g_btn_row, on_range_clicked, LV_EVENT_VALUE_CHANGED,
+                      nullptr);
 
   g_card = lv_obj_create(g_scr);
   lv_obj_remove_style_all(g_card);
   lv_obj_add_style(g_card, &styles::card, 0);
   lv_obj_set_size(g_card, cfg::SCREEN_W - 16, CARD_H);
-  lv_obj_align(g_card, LV_ALIGN_TOP_LEFT, 0, 56);
+  lv_obj_align(g_card, LV_ALIGN_TOP_LEFT, 0, CARD_Y);
   lv_obj_clear_flag(g_card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_card, LV_OBJ_FLAG_EVENT_BUBBLE);
 
@@ -276,6 +345,18 @@ void build_once() {
   g_spinner = lv_spinner_create(g_card);
   lv_obj_set_size(g_spinner, 36, 36);
   lv_obj_center(g_spinner);
+  lv_obj_set_style_opa(g_spinner, LV_OPA_50, 0);
+
+  // Centered "no data" label, shown on fetch failure. Stays inside the
+  // card so the user can still tap a different range button — which sits
+  // OUTSIDE the card, so it remains tappable while this label is up.
+  g_err_label = lv_label_create(g_card);
+  lv_obj_add_style(g_err_label, &styles::price, 0);
+  lv_obj_set_style_text_color(g_err_label, styles::dn_color(), 0);
+  lv_label_set_text(g_err_label, "no data");
+  lv_obj_center(g_err_label);
+  lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   // Y labels are children of the CARD (siblings of the chart). The
   // chart's pad_left wasn't reliable for carving out gutter space —
@@ -458,10 +539,16 @@ void render_history(const History& h) {
   lv_color_t c = up ? styles::up_color() : styles::dn_color();
   g_line_color = c;
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
+  if (g_btn_row) {
+    lv_obj_set_style_bg_color(g_btn_row, c,
+        (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
+  }
 
   // X-axis labels — three ticks at native indices [0, n/3, 2n/3] using
-  // each point's own epoch. Positioned in card-local coords below the
-  // chart. card-local x = gutter + interp_idx * plot_w / (out_n - 1).
+  // each point's own epoch. The format switches on the API-reported
+  // interval: "intraday" → HH:MM (gmtime, no local TZ on device),
+  // anything else → DD MMM (English month from kMonths).
+  bool intraday = (h.interval == "intraday");
   int n_native = n;
   int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
   time_t now = time(nullptr);
@@ -473,15 +560,22 @@ void render_history(const History& h) {
     if ((int)h.timestamps.size() == n_native && h.timestamps[idx_native] > 0) {
       t = h.timestamps[idx_native];
     } else {
-      t = now - (time_t)(n_native - 1 - idx_native) * 86400;
+      // Fallback synthetic spacing — daily for the sparkline fallback,
+      // 1 minute for the intraday case so multiple ticks still differ.
+      time_t step_s = intraday ? (time_t)60 : (time_t)86400;
+      t = now - (time_t)(n_native - 1 - idx_native) * step_s;
     }
     struct tm tmv;
 #if defined(_WIN32)
-    localtime_s(&tmv, &t);
+    gmtime_s(&tmv, &t);
 #else
-    localtime_r(&t, &tmv);
+    gmtime_r(&t, &tmv);
 #endif
-    snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
+    if (intraday) {
+      snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    } else {
+      snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
+    }
     lv_label_set_text(g_x_labels[k], buf);
 
     int idx_interp = idx_native * CR_FACTOR;
@@ -563,28 +657,55 @@ void show(QuoteStore* store, const String& symbol) {
   for (int k = 0; k < X_TICK_COUNT; ++k) lv_label_set_text(g_x_labels[k], "");
   lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_remove_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
-  g_fill_n = 0;
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
-  g_store->requestHistory(symbol);
+  // Reset range to default each time the user opens detail. Mark the
+  // default button checked; clear all other CHECKED flags first.
+  g_range_idx = kDefaultRangeIdx;
+  if (g_btn_row) {
+    for (int i = 0; i < kNumRanges; ++i) {
+      lv_buttonmatrix_clear_button_ctrl(g_btn_row, i, LV_BUTTONMATRIX_CTRL_CHECKED);
+    }
+    lv_buttonmatrix_set_button_ctrl(g_btn_row, kDefaultRangeIdx,
+                                    LV_BUTTONMATRIX_CTRL_CHECKED);
+  }
   g_active = true;
-  g_rendered = false;
+  start_history_fetch();
   lv_screen_load(g_scr);
 }
 
 void tick() {
-  if (!g_active || g_rendered || !g_store) return;
+  if (!g_active || !g_store) return;
+
+  // Error state — pop the "no data" label, stop showing the spinner,
+  // leave buttons interactive for a retry. Stays sticky until the next
+  // requestHistory clears it.
+  if (g_loading && g_store->historyError()) {
+    g_loading = false;
+    if (g_spinner)   lv_obj_add_flag   (g_spinner,   LV_OBJ_FLAG_HIDDEN);
+    if (g_err_label) lv_obj_remove_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
+    g_showed_err = true;
+    return;
+  }
+
+  if (g_rendered) return;
   History h = g_store->history();
   if (h.symbol == g_symbol && !h.closes.empty()) {
+    if (g_spinner)   lv_obj_add_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
+    if (g_err_label) lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     render_history(h);
+    g_loading  = false;
     g_rendered = true;
     return;
   }
+  // Fall back to the daily sparkline so the user sees SOMETHING while
+  // the proper history fetch is in flight. Don't latch g_rendered so
+  // the real result still takes over when it arrives.
   for (const auto& q : g_store->snapshot()) {
     if (q.symbol == g_symbol && q.sparkline.size() >= 2) {
       History fallback;
-      fallback.symbol = q.symbol;
-      fallback.closes = q.sparkline;
+      fallback.symbol   = q.symbol;
+      fallback.interval = "daily";
+      fallback.closes   = q.sparkline;
       render_history(fallback);
       return;
     }

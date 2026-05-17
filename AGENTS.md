@@ -185,6 +185,38 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Range buttons + interval-aware X axis** (2026-05): detail screen
+  gained a 5-button `lv_buttonmatrix` (1D / 5D / 1W / 1M / 6M) between
+  the header and the chart. Default checked button is **1M**;
+  `lv_buttonmatrix_set_one_checked(true)` so the framework manages the
+  mutually-exclusive checked state. Active-button bg colour follows the
+  up/down accent (refreshed in render_history).
+  - `History` gained `interval` ("intraday" | "daily"). Fetcher requests
+    `/history/{sym}?range=<value>` (the hardcoded `days=2` is gone) and
+    parses both the points array AND the top-level `interval` field.
+  - In-flight cancellation works via a generation counter:
+    `QuoteStore::requestHistory` returns a `gen`, the fetcher captures
+    it, and right before storing the result it re-checks
+    `historyGenCurrent(gen)` — a later requestHistory call has already
+    bumped the counter, so the old result is silently dropped.
+  - X-axis formatter: `intraday` → `HH:MM` (gmtime, no local TZ on
+    device), anything else → `DD MMM` (existing English month table).
+  - Loading state: `lv_spinner` over the chart at 50 % opacity while
+    a fetch is in flight. Error state: `"no data"` red label at chart
+    centre when `QuoteStore::historyError()` is true. Buttons remain
+    interactive so the user can tap another range to retry.
+  - Layout: header collapsed to 36 px (logo 32, single-line:
+    logo / symbol / price / change% / back hint) so the 24 px button
+    row fits without dropping the chart below ~140 px. CARD_Y / CARD_H
+    recomputed from the new constants.
+  - Sim: `sim/fake_data.cpp` gained `seed_intraday()` and sim_main
+    exposes `--intraday` to swap the AAPL history for 1-minute-spaced
+    intraday data, useful for visually verifying the HH:MM formatter.
+    The `--click` post-tick loop is now gated by `args.screen` (same
+    fix as the main loop) so injected clicks on the detail screen
+    don't trip the `list_screen::tick()` segfault.
+
+
 - **Chart fill rewrite + PCHIP** (2026-05): two follow-up commits.
   - *Single-gradient area fill* (`7a4a85b`): the per-trapezoid
     gradients with bbox-scaled stops still produced visible vertical

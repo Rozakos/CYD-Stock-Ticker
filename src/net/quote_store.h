@@ -17,11 +17,20 @@ struct Quote {
 
 struct History {
   String              symbol;
+  // "intraday" or "daily" — drives the X-axis label formatter on the
+  // detail screen (HH:MM vs DD MMM). Left empty for fallback paths.
+  String              interval;
   std::vector<float>  closes;
   // Per-point epoch (seconds). Same length as `closes` when populated.
   // Left empty for the daily-sparkline fallback path; the detail screen
   // synthesises one-day spacing back from "now" in that case.
   std::vector<time_t> timestamps;
+};
+
+struct HistoryRequest {
+  String   symbol;
+  String   range;   // API range token: "1d", "5d", "1w", "1mo", "6mo", ...
+  uint32_t gen = 0;
 };
 
 class QuoteStore {
@@ -38,14 +47,32 @@ class QuoteStore {
   void    setHistory(History h);
   History history() const;
 
-  // Detail request from UI -> net task.
-  void   requestHistory(const String& symbol);
-  String takePendingHistory();
+  // Detail request from UI -> net task. Returns the generation ID this
+  // request was assigned; the network task captures it before fetching
+  // and the result is stored only if `historyGenCurrent(gen)` is still
+  // true at the end of the fetch (so a later requestHistory call
+  // effectively cancels the previous one).
+  uint32_t requestHistory(const String& symbol, const String& range);
+
+  // Net task: returns true if a request is pending and copies it out
+  // (clearing the pending state). Otherwise returns false.
+  bool     takePendingHistory(HistoryRequest& out);
+
+  // True if `gen` is still the most recent request issued.
+  bool     historyGenCurrent(uint32_t gen) const;
+
+  // Sticky error flag for the most recent fetch — set on HTTP / parse
+  // failure, cleared on success. UI polls this to show "no data".
+  void setHistoryError(bool err);
+  bool historyError() const;
 
  private:
   mutable SemaphoreHandle_t _mu = nullptr;
   std::vector<Quote> _quotes;
   time_t             _lastUpdate = 0;
   History            _history;
-  String             _pendingHistory;
+  HistoryRequest     _pendingHistory;
+  bool               _historyPending = false;
+  uint32_t           _historyGen     = 0;
+  bool               _historyError   = false;
 };
