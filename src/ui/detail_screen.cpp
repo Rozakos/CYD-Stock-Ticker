@@ -68,22 +68,30 @@ void on_tap(lv_event_t*) {
   lv_screen_load(list_screen::screen());
 }
 
-// LVGL 9 line charts don't paint an area under the line natively. To
-// render the fill as a single coherent gradient (no per-column striping
-// from per-trapezoid gradients), we do this in two steps:
+// Area-fill rasterizer. Previous attempts used per-segment trapezoids
+// (each with its own gradient or solid erase) which kept producing
+// visible vertical stripes — the per-column rendering boundaries from
+// LVGL's anti-aliased trapezoid fills lit up column-aligned pixels at
+// slightly different shades, exactly the "vertical bands" symptom.
 //
-//   1. ONE lv_draw_rect with a vertical gradient covering the whole
-//      plot area — line_color at full opacity at the top, transparent
-//      at the bottom. The gradient is interpolated once across the
-//      entire rectangle by LVGL's renderer, so there are no per-column
-//      precision artifacts.
-//   2. Above-the-line "erase" trapezoids drawn in the card's bg color.
-//      These are SOLID color (no gradient), so they blend cleanly
-//      where they touch each other and leave only the polygon below
-//      the line filled with the gradient.
+// This pass is a true scanline rasterizer: for each row y of the plot
+// area we
 //
-// Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's own line renders on
-// top of both passes.
+//   1. compute ONE alpha for the entire row from the global ramp
+//        alpha(y) = MARKER_OPA_TOP * (bot - y) / bot
+//      so the colour is uniform across the row;
+//   2. find every x where the line crosses row y (line linearly
+//      interpolated between consecutive g_fill_x[]/g_fill_y[] pairs);
+//   3. walk left-to-right with a parity flag, drawing one horizontal
+//      lv_draw_rect per "in polygon" sub-interval (one rect for the
+//      typical monotonic case, two for a peak/valley that crosses y
+//      twice).
+//
+// No per-x-column draws. No per-segment gradients. Adjacent rows differ
+// in alpha by ~1 unit out of 255, well below the visible threshold, so
+// horizontal banding doesn't appear either.
+//
+// Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's line renders on top.
 void chart_area_fill_cb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_DRAW_MAIN_BEGIN) return;
   if (g_fill_n < 2) return;
@@ -100,56 +108,75 @@ void chart_area_fill_cb(lv_event_t* e) {
   const int32_t cy  = obj_coords.y1;
   const int32_t bot = g_fill_bottom_y;
   if (bot <= 0) return;
+  const int32_t plot_w_end = g_fill_x[g_fill_n - 1];
 
-  // Step 1: one rectangle, one gradient, full plot width.
-  lv_draw_rect_dsc_t rdsc;
-  lv_draw_rect_dsc_init(&rdsc);
-  rdsc.bg_opa              = LV_OPA_COVER;
-  rdsc.bg_color            = g_line_color;
-  rdsc.border_width        = 0;
-  rdsc.bg_grad.dir         = LV_GRAD_DIR_VER;
-  rdsc.bg_grad.stops_count = 2;
-  rdsc.bg_grad.stops[0].color = g_line_color;
-  rdsc.bg_grad.stops[0].opa   = MARKER_OPA_TOP;
-  rdsc.bg_grad.stops[0].frac  = 0;
-  rdsc.bg_grad.stops[1].color = g_line_color;
-  rdsc.bg_grad.stops[1].opa   = LV_OPA_TRANSP;
-  rdsc.bg_grad.stops[1].frac  = 255;
+  lv_draw_rect_dsc_t row_dsc;
+  lv_draw_rect_dsc_init(&row_dsc);
+  row_dsc.bg_color            = g_line_color;
+  row_dsc.border_width        = 0;
+  row_dsc.bg_grad.dir         = LV_GRAD_DIR_NONE;
+  row_dsc.bg_grad.stops_count = 0;
 
-  lv_area_t plot_area;
-  plot_area.x1 = cx + g_fill_x[0];
-  plot_area.y1 = cy;
-  plot_area.x2 = cx + g_fill_x[g_fill_n - 1];
-  plot_area.y2 = cy + bot;
-  lv_draw_rect(layer, &rdsc, &plot_area);
+  // Reused scratch — single-threaded behind g_lvglMu so `static` is fine.
+  static int32_t crossings[CR_MAX_OUT];
 
-  // Step 2: mask out the area above the line by overdrawing with the
-  // card's bg color. Per-segment trapezoid → two solid-color triangles.
-  // No gradient on the mask, so no inter-trapezoid gradient mismatch.
-  lv_draw_triangle_dsc_t tdsc;
-  lv_draw_triangle_dsc_init(&tdsc);
-  tdsc.color = styles::card_color();
-  tdsc.opa   = LV_OPA_COVER;
-  tdsc.grad.dir         = LV_GRAD_DIR_NONE;
-  tdsc.grad.stops_count = 0;
+  for (int32_t y = 0; y < bot; ++y) {
+    int alpha = (MARKER_OPA_TOP * (bot - y)) / bot;
+    if (alpha <= 0) continue;
+    row_dsc.bg_opa = (lv_opa_t)alpha;
 
-  for (int i = 0; i + 1 < g_fill_n; ++i) {
-    int32_t ax0 = cx + g_fill_x[i],     ay0 = cy + g_fill_y[i];
-    int32_t ax1 = cx + g_fill_x[i + 1], ay1 = cy + g_fill_y[i + 1];
+    // Find every line crossing of horizontal y=row using half-open
+    // bracketing so each crossing is counted exactly once.
+    int n_cross = 0;
+    for (int i = 0; i + 1 < g_fill_n; ++i) {
+      int32_t y0 = g_fill_y[i];
+      int32_t y1 = g_fill_y[i + 1];
+      if ((y0 < y && y1 >= y) || (y0 >= y && y1 < y)) {
+        int32_t x0 = g_fill_x[i];
+        int32_t x1 = g_fill_x[i + 1];
+        int32_t dy = y1 - y0;
+        if (dy == 0) continue;
+        crossings[n_cross++] = x0 + ((x1 - x0) * (y - y0)) / dy;
+      }
+    }
 
-    // Trapezoid above the line:
-    //   top_left = (ax0, cy), top_right = (ax1, cy)
-    //   bottom_right = (ax1, ay1), bottom_left = (ax0, ay0)
-    // Split along the diagonal (ax0, cy) ↔ (ax1, ay1):
-    tdsc.p[0].x = ax0; tdsc.p[0].y = cy;
-    tdsc.p[1].x = ax1; tdsc.p[1].y = cy;
-    tdsc.p[2].x = ax1; tdsc.p[2].y = ay1;
-    lv_draw_triangle(layer, &tdsc);
+    // Insertion sort — typical n_cross is 0..2 so this is essentially free.
+    for (int i = 1; i < n_cross; ++i) {
+      int32_t v = crossings[i];
+      int j = i;
+      while (j > 0 && crossings[j - 1] > v) {
+        crossings[j] = crossings[j - 1];
+        --j;
+      }
+      crossings[j] = v;
+    }
 
-    tdsc.p[0].x = ax0; tdsc.p[0].y = cy;
-    tdsc.p[1].x = ax1; tdsc.p[1].y = ay1;
-    tdsc.p[2].x = ax0; tdsc.p[2].y = ay0;
-    lv_draw_triangle(layer, &tdsc);
+    // Walk x left → right. Start state: "in polygon" iff the line is
+    // above this row at the left edge (g_fill_y[0] < y means the line
+    // sits higher on screen than row y, so this row is below the line).
+    bool in = (g_fill_y[0] < y);
+    int32_t x_curr = g_fill_x[0];
+    for (int k = 0; k < n_cross; ++k) {
+      int32_t x_next = crossings[k];
+      if (in && x_next > x_curr) {
+        lv_area_t r;
+        r.x1 = cx + x_curr;
+        r.y1 = cy + y;
+        r.x2 = cx + x_next - 1;
+        r.y2 = cy + y;
+        lv_draw_rect(layer, &row_dsc, &r);
+      }
+      x_curr = x_next;
+      in = !in;
+    }
+    if (in && plot_w_end > x_curr) {
+      lv_area_t r;
+      r.x1 = cx + x_curr;
+      r.y1 = cy + y;
+      r.x2 = cx + plot_w_end;
+      r.y2 = cy + y;
+      lv_draw_rect(layer, &row_dsc, &r);
+    }
   }
 }
 
