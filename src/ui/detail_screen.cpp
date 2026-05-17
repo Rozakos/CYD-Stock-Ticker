@@ -36,12 +36,12 @@ static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 // btnmatrix is `g_range_labels[]`; the value sent in `?range=` is
 // `g_range_api[]`. Keep both arrays in lock-step.
 static constexpr int kNumRanges       = 5;
-static constexpr int kDefaultRangeIdx = 3;     // "1M"
+static constexpr int kDefaultRangeIdx = 0;     // "1D"
 static const char* g_range_labels[] = {
-    "1D", "5D", "1W", "1M", "6M", ""    // trailing "" terminates lv_buttonmatrix map
+    "1D", "5D", "1M", "6M", "1Y", ""    // trailing "" terminates lv_buttonmatrix map
 };
 static const char* g_range_api[kNumRanges] = {
-    "1d", "5d", "1w", "1mo", "6mo"
+    "1d", "5d", "1mo", "6mo", "1y"
 };
 
 static const char* kMonths[] = {
@@ -77,7 +77,6 @@ lv_obj_t* g_err_label  = nullptr;
 lv_obj_t* g_y_labels[MAX_Y_TICKS]  = {};
 lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
 lv_obj_t* g_marker_dot   = nullptr;
-lv_obj_t* g_marker_label = nullptr;
 lv_color_t g_line_color  = lv_color_hex(0x4ade80);
 
 // Geometry handed to the area-fill draw callback. All chart-local
@@ -112,8 +111,7 @@ void start_history_fetch() {
   if (g_err_label) lv_obj_add_flag   (g_err_label, LV_OBJ_FLAG_HIDDEN);
   // Hide the marker / fill data while the new range loads so we don't
   // briefly render stale labels at the old data's coordinates.
-  if (g_marker_dot)   lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
-  if (g_marker_label) lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
+  if (g_marker_dot) lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
   g_fill_n = 0;
   g_store->requestHistory(g_symbol, g_range_api[g_range_idx]);
 }
@@ -394,17 +392,15 @@ void build_once() {
   lv_obj_clear_flag(g_marker_dot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
-
-  g_marker_label = lv_label_create(g_chart);
-  lv_obj_add_style(g_marker_label, &styles::price, 0);
-  lv_label_set_text(g_marker_label, "");
-  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 void rebuild_logo(const String& symbol) {
   lv_obj_clean(g_logo_slot);
-  logos::make(g_logo_slot, symbol, 48);
+  // Pass the actual slot size so the embedded ARGB image (48 px source)
+  // and the letter-badge fallback both render at the slot's pixel size.
+  // logos::make already calls lv_image_set_scale for the embedded path
+  // and sets badge size + font directly for the fallback path.
+  logos::make(g_logo_slot, symbol, LOGO_SIZE);
 }
 
 // Pick the smallest step S from kSteps such that range / S ≤ 5, so we end
@@ -591,18 +587,14 @@ void render_history(const History& h) {
     lv_obj_set_pos(g_x_labels[k], lx, ly);
   }
 
-  // Current-price marker (chart child). lv_chart_get_point_pos_by_id
+  // Current-price marker (chart child). Dot only — the floating price
+  // label was redundant with the header price readout and collided with
+  // the top Y-tick label / line crossings. lv_chart_get_point_pos_by_id
   // returns chart-local coords so positions apply directly.
   lv_obj_set_style_bg_color(g_marker_dot, c, 0);
   lv_obj_remove_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
 
-  snprintf(buf, sizeof(buf), "%.2f", last);
-  lv_label_set_text(g_marker_label, buf);
-  lv_obj_set_style_text_color(g_marker_label, c, 0);
-  lv_obj_remove_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
-
   lv_obj_update_layout(g_chart);
-  lv_obj_update_layout(g_marker_label);
   lv_point_t tip;
   lv_chart_get_point_pos_by_id(g_chart, g_ser, out_n - 1, &tip);
 
@@ -613,28 +605,6 @@ void render_history(const History& h) {
   if (dot_y < 0)                        dot_y = 0;
   if (dot_y > plot_h - MARKER_DOT_SIZE) dot_y = plot_h - MARKER_DOT_SIZE;
   lv_obj_set_pos(g_marker_dot, dot_x, dot_y);
-
-  lv_coord_t lw = lv_obj_get_width(g_marker_label);
-  lv_coord_t lh = lv_obj_get_height(g_marker_label);
-  lv_coord_t lx, ly;
-  if (tip.y < (plot_h * MARKER_TOP_BAND_PCT) / 100) {
-    // Tip is high in the chart — placing the label next to the dot
-    // would collide with the topmost Y tick. Drop it under the dot.
-    lx = tip.x - lw / 2;
-    ly = tip.y + MARKER_DOT_SIZE / 2 + 2;
-  } else {
-    // Default: to the left of the dot, vertically centred. Flip to
-    // the right only if the left placement would leave the chart.
-    lx = tip.x - MARKER_DOT_SIZE / 2 - lw - 4;
-    if (lx < 0) lx = tip.x + MARKER_DOT_SIZE / 2 + 4;
-    ly = tip.y - lh / 2;
-  }
-  // User spec: right edge ≤ chart_right - 2 px.
-  if (lx + lw > plot_w - 2) lx = plot_w - 2 - lw;
-  if (lx < 0)             lx = 0;
-  if (ly < 0)             ly = 0;
-  if (ly + lh > plot_h)   ly = plot_h - lh;
-  lv_obj_set_pos(g_marker_label, lx, ly);
 }
 
 }  // namespace
@@ -655,8 +625,7 @@ void show(QuoteStore* store, const String& symbol) {
     lv_obj_add_flag(g_y_labels[j], LV_OBJ_FLAG_HIDDEN);
   }
   for (int k = 0; k < X_TICK_COUNT; ++k) lv_label_set_text(g_x_labels[k], "");
-  lv_obj_add_flag(g_marker_dot,   LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(g_marker_label, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   // Reset range to default each time the user opens detail. Mark the
   // default button checked; clear all other CHECKED flags first.
