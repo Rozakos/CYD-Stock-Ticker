@@ -68,20 +68,22 @@ void on_tap(lv_event_t*) {
   lv_screen_load(list_screen::screen());
 }
 
-// LVGL 9 line charts don't paint an area under the line natively. We fill
-// it manually as a chain of vertical-gradient trapezoids (split into pairs
-// of triangles) using EVERY interpolated point — stride=1 — so the top
-// edge of the polygon is exactly the Catmull-Rom line, with no chords
-// cutting across the curve.
+// LVGL 9 line charts don't paint an area under the line natively. To
+// render the fill as a single coherent gradient (no per-column striping
+// from per-trapezoid gradients), we do this in two steps:
 //
-// Each triangle's gradient stops are derived from its own bbox so the
-// per-triangle local gradient still samples the SAME global profile
-// (full opacity at chart top, transparent at chart bottom). Adjacent
-// trapezoids therefore meet with matching opacity along the seam and
-// there are no visible bands or vertical stripes.
+//   1. ONE lv_draw_rect with a vertical gradient covering the whole
+//      plot area — line_color at full opacity at the top, transparent
+//      at the bottom. The gradient is interpolated once across the
+//      entire rectangle by LVGL's renderer, so there are no per-column
+//      precision artifacts.
+//   2. Above-the-line "erase" trapezoids drawn in the card's bg color.
+//      These are SOLID color (no gradient), so they blend cleanly
+//      where they touch each other and leave only the polygon below
+//      the line filled with the gradient.
 //
-// Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's line renders cleanly
-// on top of the fill.
+// Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's own line renders on
+// top of both passes.
 void chart_area_fill_cb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_DRAW_MAIN_BEGIN) return;
   if (g_fill_n < 2) return;
@@ -94,57 +96,59 @@ void chart_area_fill_cb(lv_event_t* e) {
 
   lv_area_t obj_coords;
   lv_obj_get_coords(chart, &obj_coords);
-  const int32_t cx     = obj_coords.x1;
-  const int32_t cy     = obj_coords.y1;
-  const int32_t bot    = g_fill_bottom_y;     // chart-local bottom y
-  const int32_t ay_bot = cy + bot;
+  const int32_t cx  = obj_coords.x1;
+  const int32_t cy  = obj_coords.y1;
+  const int32_t bot = g_fill_bottom_y;
   if (bot <= 0) return;
 
-  // Linear ramp: line_color at full opacity (top of plot) → transparent
-  // (bottom of plot). Each triangle's stops are sampled from this so all
-  // triangles agree at any shared y.
-  auto opa_at = [&](int32_t y_local) -> lv_opa_t {
-    if (y_local <= 0)   return MARKER_OPA_TOP;
-    if (y_local >= bot) return LV_OPA_TRANSP;
-    int v = (MARKER_OPA_TOP * (bot - y_local)) / bot;
-    if (v < 0)   v = 0;
-    if (v > 255) v = 255;
-    return (lv_opa_t)v;
-  };
+  // Step 1: one rectangle, one gradient, full plot width.
+  lv_draw_rect_dsc_t rdsc;
+  lv_draw_rect_dsc_init(&rdsc);
+  rdsc.bg_opa              = LV_OPA_COVER;
+  rdsc.bg_color            = g_line_color;
+  rdsc.border_width        = 0;
+  rdsc.bg_grad.dir         = LV_GRAD_DIR_VER;
+  rdsc.bg_grad.stops_count = 2;
+  rdsc.bg_grad.stops[0].color = g_line_color;
+  rdsc.bg_grad.stops[0].opa   = MARKER_OPA_TOP;
+  rdsc.bg_grad.stops[0].frac  = 0;
+  rdsc.bg_grad.stops[1].color = g_line_color;
+  rdsc.bg_grad.stops[1].opa   = LV_OPA_TRANSP;
+  rdsc.bg_grad.stops[1].frac  = 255;
 
+  lv_area_t plot_area;
+  plot_area.x1 = cx + g_fill_x[0];
+  plot_area.y1 = cy;
+  plot_area.x2 = cx + g_fill_x[g_fill_n - 1];
+  plot_area.y2 = cy + bot;
+  lv_draw_rect(layer, &rdsc, &plot_area);
+
+  // Step 2: mask out the area above the line by overdrawing with the
+  // card's bg color. Per-segment trapezoid → two solid-color triangles.
+  // No gradient on the mask, so no inter-trapezoid gradient mismatch.
   lv_draw_triangle_dsc_t tdsc;
   lv_draw_triangle_dsc_init(&tdsc);
-  tdsc.color = g_line_color;
+  tdsc.color = styles::card_color();
   tdsc.opa   = LV_OPA_COVER;
-  tdsc.grad.dir         = LV_GRAD_DIR_VER;
-  tdsc.grad.stops_count = 2;
-  tdsc.grad.stops[0].color = g_line_color;
-  tdsc.grad.stops[0].frac  = 0;
-  tdsc.grad.stops[1].color = g_line_color;
-  tdsc.grad.stops[1].frac  = 255;
-  tdsc.grad.stops[1].opa   = opa_at(bot);   // same for every triangle's bottom stop
+  tdsc.grad.dir         = LV_GRAD_DIR_NONE;
+  tdsc.grad.stops_count = 0;
 
   for (int i = 0; i + 1 < g_fill_n; ++i) {
-    int32_t y0 = g_fill_y[i];
-    int32_t y1 = g_fill_y[i + 1];
-    int32_t ax0 = cx + g_fill_x[i],     ay0 = cy + y0;
-    int32_t ax1 = cx + g_fill_x[i + 1], ay1 = cy + y1;
+    int32_t ax0 = cx + g_fill_x[i],     ay0 = cy + g_fill_y[i];
+    int32_t ax1 = cx + g_fill_x[i + 1], ay1 = cy + g_fill_y[i + 1];
 
-    // Upper triangle: line[i], line[i+1], bottom_right. Its bbox top is
-    // the higher of the two line points.
-    int32_t t1_ytop = (y0 < y1) ? y0 : y1;
-    tdsc.grad.stops[0].opa = opa_at(t1_ytop);
-    tdsc.p[0].x = ax0; tdsc.p[0].y = ay0;
-    tdsc.p[1].x = ax1; tdsc.p[1].y = ay1;
-    tdsc.p[2].x = ax1; tdsc.p[2].y = ay_bot;
+    // Trapezoid above the line:
+    //   top_left = (ax0, cy), top_right = (ax1, cy)
+    //   bottom_right = (ax1, ay1), bottom_left = (ax0, ay0)
+    // Split along the diagonal (ax0, cy) ↔ (ax1, ay1):
+    tdsc.p[0].x = ax0; tdsc.p[0].y = cy;
+    tdsc.p[1].x = ax1; tdsc.p[1].y = cy;
+    tdsc.p[2].x = ax1; tdsc.p[2].y = ay1;
     lv_draw_triangle(layer, &tdsc);
 
-    // Lower triangle: line[i], bottom_right, bottom_left. Its bbox top
-    // is at line[i] (single vertex above bottom row).
-    tdsc.grad.stops[0].opa = opa_at(y0);
-    tdsc.p[0].x = ax0; tdsc.p[0].y = ay0;
-    tdsc.p[1].x = ax1; tdsc.p[1].y = ay_bot;
-    tdsc.p[2].x = ax0; tdsc.p[2].y = ay_bot;
+    tdsc.p[0].x = ax0; tdsc.p[0].y = cy;
+    tdsc.p[1].x = ax1; tdsc.p[1].y = ay1;
+    tdsc.p[2].x = ax0; tdsc.p[2].y = ay0;
     lv_draw_triangle(layer, &tdsc);
   }
 }
