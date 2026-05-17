@@ -185,6 +185,33 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Chart polish bug-fix pass** (2026-05): single follow-up commit fixing
+  six visible issues from the four polish commits below.
+  - *Nice-step Y ticks*: `pick_step()` picks from {0.5,1,2,5,10,20,25,50,
+    100,200,500,1000,2000,5000} so range/step ≤ 5, then snaps min/max
+    outwards to multiples of the step. Pool of 8 hidden Y labels reused
+    per render. AAPL now shows 195/190/185/180 instead of raw
+    893.6/885.8/877.9.
+  - *Per-point X-axis timestamps*: `History` gained `std::vector<time_t>
+    timestamps`; the fetcher captures `points[].ts` and `fake_data`
+    populates daily-spaced epochs in the sim. Three X ticks at native
+    indices [0, n/3, 2n/3] each read their own epoch so dates differ.
+    Rightmost (n-1) tick is intentionally omitted — the current-price
+    marker always lands there and a tick label would collide.
+  - *Gradient area fill*: LVGL 9 line charts ignore `LV_PART_ITEMS`
+    bg-gradient styles (that part is for bar charts). Fallback is a
+    `LV_EVENT_DRAW_MAIN_BEGIN` callback that draws ~50 vertical-gradient
+    trapezoids (split into pairs of triangles via `lv_draw_triangle`,
+    `dsc.grad.dir = LV_GRAD_DIR_VER`) under the line. Point positions
+    are precomputed in `render_history` (`g_fill_x[]`/`g_fill_y[]`) so
+    the draw callback never calls `lv_chart_get_point_pos_by_id` —
+    doing so during DRAW_MAIN_BEGIN tripped a heap-corruption guard on
+    Windows builds.
+  - *Y/X label gutters*: chart gets dynamic `pad_left = widest_y_label
+    + 4` and `pad_bottom = x_label_height + 2` so Y labels live in a
+    clean left strip and X labels in a bottom strip — neither overlaps
+    the plot, and the bottom Y label no longer collides with the
+    bottom-left X label.
 - **Detail chart polish — four commits** (2026-05):
   1. *Axis labels + grid* (`73f0a04`): Y-axis price labels at div lines 1/2/3
      (left edge, `styles::muted`); X-axis "DD MMM" date labels (Latin months,

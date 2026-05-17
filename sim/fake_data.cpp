@@ -38,7 +38,8 @@ void seed(QuoteStore& store) {
   store.setQuotes(std::move(qs), std::time(nullptr));
 
   // Pre-populate detail history for AAPL so the detail screen renders nicely
-  // even before the UI requests it.
+  // even before the UI requests it. Daily spacing back from "now" gives the
+  // X-axis ticks distinct DD MMM labels in the sim.
   History h;
   h.symbol = "AAPL";
   h.closes = {
@@ -46,6 +47,12 @@ void seed(QuoteStore& store) {
     186.5f, 188, 189, 188.5f, 189.5f, 190, 190.5f, 191, 190.7f, 191.5f,
     190.9f, 191.2f, 191.6f, 191.8f, 192.0f, 191.7f, 192.1f, 192.4f, 192.0f, 192.13f
   };
+  time_t now = std::time(nullptr);
+  h.timestamps.reserve(h.closes.size());
+  int n = (int)h.closes.size();
+  for (int i = 0; i < n; ++i) {
+    h.timestamps.push_back(now - (time_t)(n - 1 - i) * 86400);
+  }
   store.setHistory(std::move(h));
 }
 

@@ -116,6 +116,7 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
 
   JsonDocument filter;
   filter["points"][0]["last"] = true;
+  filter["points"][0]["ts"]   = true;
 
   String url = String(cfg::API_BASE) + "/history/" + symbol + "?days=2";
   JsonDocument doc;
@@ -127,11 +128,16 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
     return false;
   }
 
-  std::vector<float> closes;
+  std::vector<float>  closes;
+  std::vector<time_t> timestamps;
   closes.reserve(pts.size());
+  timestamps.reserve(pts.size());
   for (JsonVariantConst p : pts) {
     float v = p["last"] | NAN;
-    if (!isnan(v) && v > 0) closes.push_back(v);
+    if (isnan(v) || v <= 0) continue;
+    time_t t = (time_t)(p["ts"] | (long long)0);
+    closes.push_back(v);
+    timestamps.push_back(t);
   }
   if (closes.empty()) {
     log_w("[%s] history: no valid points", symbol.c_str());
@@ -139,13 +145,15 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   }
 
   if (closes.size() > cfg::HISTORY_POINTS) {
-    closes.erase(closes.begin(),
-                 closes.begin() + (closes.size() - cfg::HISTORY_POINTS));
+    size_t drop = closes.size() - cfg::HISTORY_POINTS;
+    closes.erase(closes.begin(), closes.begin() + drop);
+    timestamps.erase(timestamps.begin(), timestamps.begin() + drop);
   }
 
   History h;
-  h.symbol = symbol;
-  h.closes = std::move(closes);
+  h.symbol     = symbol;
+  h.closes     = std::move(closes);
+  h.timestamps = std::move(timestamps);
   store.setHistory(std::move(h));
   return true;
 }

@@ -18,6 +18,10 @@ struct Quote {
 struct History {
   String              symbol;
   std::vector<float>  closes;
+  // Per-point epoch (seconds). Same length as `closes` when populated.
+  // Left empty for the daily-sparkline fallback path; the detail screen
+  // synthesises one-day spacing back from "now" in that case.
+  std::vector<time_t> timestamps;
 };
 
 class QuoteStore {
