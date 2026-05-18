@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "../config.h"
+#include "../util/area_fill.h"
 #include "../util/interpolate.h"
 #include "../net/quote_store.h"
 #include "list_screen.h"
@@ -143,28 +144,11 @@ void start_history_fetch() {
   g_store->requestHistory(g_symbol, g_range_api[g_range_idx]);
 }
 
-// Area-fill rasterizer. Previous attempts used per-segment trapezoids
-// (each with its own gradient or solid erase) which kept producing
-// visible vertical stripes — the per-column rendering boundaries from
-// LVGL's anti-aliased trapezoid fills lit up column-aligned pixels at
-// slightly different shades, exactly the "vertical bands" symptom.
-//
-// This pass is a true scanline rasterizer: for each row y of the plot
-// area we
-//
-//   1. compute ONE alpha for the entire row from the global ramp
-//        alpha(y) = MARKER_OPA_TOP * (bot - y) / bot
-//      so the colour is uniform across the row;
-//   2. find every x where the line crosses row y (line linearly
-//      interpolated between consecutive g_fill_x[]/g_fill_y[] pairs);
-//   3. walk left-to-right with a parity flag, drawing one horizontal
-//      lv_draw_rect per "in polygon" sub-interval (one rect for the
-//      typical monotonic case, two for a peak/valley that crosses y
-//      twice).
-//
-// No per-x-column draws. No per-segment gradients. Adjacent rows differ
-// in alpha by ~1 unit out of 255, well below the visible threshold, so
-// horizontal banding doesn't appear either.
+// Area-fill is drawn by util::draw_polyline_fill (shared with the list
+// sparklines). The helper rasterizes the polygon row-by-row so every
+// pixel in a given row uses the same alpha — vertical bands cannot
+// appear at trapezoid seams (which was the symptom of every previous
+// per-x-column / per-trapezoid attempt).
 //
 // Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's line renders on top.
 void chart_area_fill_cb(lv_event_t* e) {
@@ -179,80 +163,9 @@ void chart_area_fill_cb(lv_event_t* e) {
 
   lv_area_t obj_coords;
   lv_obj_get_coords(chart, &obj_coords);
-  const int32_t cx  = obj_coords.x1;
-  const int32_t cy  = obj_coords.y1;
-  const int32_t bot = g_fill_bottom_y;
-  if (bot <= 0) return;
-  const int32_t plot_w_end = g_fill_x[g_fill_n - 1];
-
-  lv_draw_rect_dsc_t row_dsc;
-  lv_draw_rect_dsc_init(&row_dsc);
-  row_dsc.bg_color            = g_line_color;
-  row_dsc.border_width        = 0;
-  row_dsc.bg_grad.dir         = LV_GRAD_DIR_NONE;
-  row_dsc.bg_grad.stops_count = 0;
-
-  // Reused scratch — single-threaded behind g_lvglMu so `static` is fine.
-  static int32_t crossings[CR_MAX_OUT];
-
-  for (int32_t y = 0; y < bot; ++y) {
-    int alpha = (MARKER_OPA_TOP * (bot - y)) / bot;
-    if (alpha <= 0) continue;
-    row_dsc.bg_opa = (lv_opa_t)alpha;
-
-    // Find every line crossing of horizontal y=row using half-open
-    // bracketing so each crossing is counted exactly once.
-    int n_cross = 0;
-    for (int i = 0; i + 1 < g_fill_n; ++i) {
-      int32_t y0 = g_fill_y[i];
-      int32_t y1 = g_fill_y[i + 1];
-      if ((y0 < y && y1 >= y) || (y0 >= y && y1 < y)) {
-        int32_t x0 = g_fill_x[i];
-        int32_t x1 = g_fill_x[i + 1];
-        int32_t dy = y1 - y0;
-        if (dy == 0) continue;
-        crossings[n_cross++] = x0 + ((x1 - x0) * (y - y0)) / dy;
-      }
-    }
-
-    // Insertion sort — typical n_cross is 0..2 so this is essentially free.
-    for (int i = 1; i < n_cross; ++i) {
-      int32_t v = crossings[i];
-      int j = i;
-      while (j > 0 && crossings[j - 1] > v) {
-        crossings[j] = crossings[j - 1];
-        --j;
-      }
-      crossings[j] = v;
-    }
-
-    // Walk x left → right. Start state: "in polygon" iff the line is
-    // above this row at the left edge (g_fill_y[0] < y means the line
-    // sits higher on screen than row y, so this row is below the line).
-    bool in = (g_fill_y[0] < y);
-    int32_t x_curr = g_fill_x[0];
-    for (int k = 0; k < n_cross; ++k) {
-      int32_t x_next = crossings[k];
-      if (in && x_next > x_curr) {
-        lv_area_t r;
-        r.x1 = cx + x_curr;
-        r.y1 = cy + y;
-        r.x2 = cx + x_next - 1;
-        r.y2 = cy + y;
-        lv_draw_rect(layer, &row_dsc, &r);
-      }
-      x_curr = x_next;
-      in = !in;
-    }
-    if (in && plot_w_end > x_curr) {
-      lv_area_t r;
-      r.x1 = cx + x_curr;
-      r.y1 = cy + y;
-      r.x2 = cx + plot_w_end;
-      r.y2 = cy + y;
-      lv_draw_rect(layer, &row_dsc, &r);
-    }
-  }
+  util::draw_polyline_fill(layer, g_fill_x, g_fill_y, g_fill_n,
+                           obj_coords.x1, obj_coords.y1,
+                           g_fill_bottom_y, g_line_color, MARKER_OPA_TOP);
 }
 
 void build_once() {

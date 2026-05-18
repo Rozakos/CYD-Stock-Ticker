@@ -7,6 +7,7 @@
 #include "../config.h"
 #include "../net/quote_store.h"
 #include "../settings/settings_store.h"
+#include "../util/area_fill.h"
 #include "detail_screen.h"
 #include "logos.h"
 #include "settings_screen.h"
@@ -40,9 +41,41 @@ struct Row {
   lv_obj_t* pct;
   lv_obj_t* spark;
   lv_point_precise_t spark_pts[cfg::SPARKLINE_POINTS];
+  // Snapshot of the spark points in int32 for the polygon-fill helper.
+  // Kept in lock-step with spark_pts; the lv_line widget owns the curve
+  // and we own the fill underneath.
+  int32_t   spark_xs[cfg::SPARKLINE_POINTS];
+  int32_t   spark_ys[cfg::SPARKLINE_POINTS];
+  int       spark_n = 0;
   String    symbol;
 };
 std::vector<Row> g_rows;
+
+// LV_EVENT_DRAW_MAIN_BEGIN handler on each sparkline. Draws the area
+// gradient (line colour at top → transparent at bottom) before the
+// lv_line widget renders the stroke on top.
+void spark_fill_cb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_DRAW_MAIN_BEGIN) return;
+  lv_obj_t* spark = (lv_obj_t*)lv_event_get_target(e);
+  if (!spark) return;
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (!layer) return;
+
+  size_t idx = (size_t)(uintptr_t)lv_obj_get_user_data(spark);
+  if (idx >= g_rows.size()) return;
+  const Row& r = g_rows[idx];
+  if (r.spark_n < 2) return;
+
+  lv_area_t coords;
+  lv_obj_get_coords(spark, &coords);
+  lv_color_t color = lv_obj_get_style_line_color(spark, LV_PART_MAIN);
+  // Bottom of the polygon: just inside the obj's bottom edge so the
+  // gradient runs the full sparkline height. SPARK_H - 1 matches what
+  // the inclusive lv_area_t expects.
+  util::draw_polyline_fill(layer, r.spark_xs, r.spark_ys, r.spark_n,
+                           coords.x1, coords.y1,
+                           SPARK_H - 1, color, LV_OPA_50);
+}
 
 void on_row_click(lv_event_t* e) {
   const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
@@ -89,6 +122,12 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   lv_obj_set_style_line_rounded(r.spark, true, 0);
   lv_obj_set_style_line_color(r.spark, styles::muted_color(), 0);
   lv_obj_add_flag(r.spark, LV_OBJ_FLAG_EVENT_BUBBLE);
+  // Row index baked into user_data so the polygon-fill draw event can
+  // look this Row up in g_rows. Wired up after push_back below — the
+  // make_row call returns a temp Row, the final address only stabilises
+  // once it's in g_rows (which we reserve() so push_back doesn't move).
+  lv_obj_add_event_cb(r.spark, spark_fill_cb,
+                      LV_EVENT_DRAW_MAIN_BEGIN, nullptr);
 
   lv_obj_t* price_col = lv_obj_create(r.obj);
   lv_obj_remove_style_all(price_col);
@@ -115,7 +154,9 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
 
 void update_spark(Row& r, const std::vector<float>& closes, bool up) {
   if (closes.size() < 2) {
+    r.spark_n = 0;
     lv_line_set_points(r.spark, r.spark_pts, 0);
+    lv_obj_invalidate(r.spark);
     return;
   }
   size_t n = closes.size();
@@ -133,13 +174,18 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
   for (size_t i = 0; i < n; ++i) {
     float v = closes[closes.size() - n + i];
     float t = (n == 1) ? 0.5f : (float)i / (float)(n - 1);
-    r.spark_pts[i].x = (lv_value_precise_t)(1 + t * W);
-    r.spark_pts[i].y =
-        (lv_value_precise_t)(2 + (1.0f - (v - lo) / span) * H);
+    float x = 1.0f + t * (float)W;
+    float y = 2.0f + (1.0f - (v - lo) / span) * (float)H;
+    r.spark_pts[i].x = (lv_value_precise_t)x;
+    r.spark_pts[i].y = (lv_value_precise_t)y;
+    r.spark_xs[i] = (int32_t)(x + 0.5f);
+    r.spark_ys[i] = (int32_t)(y + 0.5f);
   }
+  r.spark_n = (int)n;
   lv_line_set_points(r.spark, r.spark_pts, n);
   lv_obj_set_style_line_color(
       r.spark, up ? styles::up_color() : styles::dn_color(), 0);
+  lv_obj_invalidate(r.spark);
 }
 
 void rebuild_rows(const std::vector<Quote>& quotes) {
@@ -152,6 +198,12 @@ void rebuild_rows(const std::vector<Quote>& quotes) {
     g_rows.clear();
     g_rows.reserve(quotes.size());
     for (const auto& q : quotes) g_rows.push_back(make_row(g_list, q.symbol));
+    // Bake the row index into each sparkline's user_data now that the
+    // Row's address is stable (g_rows was reserve()'d above, so push_back
+    // doesn't relocate). spark_fill_cb uses this to look up the row.
+    for (size_t i = 0; i < g_rows.size(); ++i) {
+      lv_obj_set_user_data(g_rows[i].spark, (void*)(uintptr_t)i);
+    }
   }
   for (size_t i = 0; i < quotes.size(); ++i) {
     const auto& q = quotes[i];
