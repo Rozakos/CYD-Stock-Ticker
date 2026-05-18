@@ -166,8 +166,19 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
     timestamps.erase(timestamps.begin(), timestamps.begin() + drop);
   }
 
+  float first = closes.front();
+  float last  = closes.back();
+  float pct   = first != 0.0f ? (last - first) / first * 100.0f : 0.0f;
+  time_t first_ts = timestamps.empty() ? 0 : timestamps.front();
+  time_t last_ts  = timestamps.empty() ? 0 : timestamps.back();
+  log_i("[%s] history %s: interval=%s pts=%u first=%.2f last=%.2f change=%+.2f%% ts=%ld..%ld",
+        symbol.c_str(), range.c_str(), interval.c_str(),
+        (unsigned)closes.size(), first, last, pct,
+        (long)first_ts, (long)last_ts);
+
   History h;
   h.symbol     = symbol;
+  h.range      = range;
   h.interval   = interval;
   h.closes     = std::move(closes);
   h.timestamps = std::move(timestamps);

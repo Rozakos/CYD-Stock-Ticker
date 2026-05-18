@@ -17,6 +17,7 @@ struct Quote {
 
 struct History {
   String              symbol;
+  String              range;    // API range token this history came from.
   // "intraday" or "daily" — drives the X-axis label formatter on the
   // detail screen (HH:MM vs DD MMM). Left empty for fallback paths.
   String              interval;

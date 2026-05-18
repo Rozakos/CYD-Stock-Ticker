@@ -20,6 +20,24 @@ Quote make(const char* sym, float last, float pct,
   return q;
 }
 
+void set_history(QuoteStore& store, const char* symbol, const char* interval,
+                 const char* range, const std::vector<float>& closes,
+                 time_t step_s) {
+  History h;
+  h.symbol   = symbol;
+  h.range    = range;
+  h.interval = interval;
+  h.closes   = closes;
+  time_t now = std::time(nullptr);
+  int n = (int)h.closes.size();
+  h.timestamps.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    h.timestamps.push_back(now - (time_t)(n - 1 - i) * step_s);
+  }
+  store.setHistory(std::move(h));
+  store.setHistoryError(false);
+}
+
 }  // namespace
 
 void seed(QuoteStore& store) {
@@ -61,22 +79,38 @@ void seed(QuoteStore& store) {
 // spacing) — used by the sim to visually verify the HH:MM X-axis
 // formatter. Caller asks for it after `seed()`.
 void seed_intraday(QuoteStore& store, const char* symbol) {
-  History h;
-  h.symbol   = symbol;
-  h.interval = "intraday";
-  h.closes = {
+  set_history(store, symbol, "intraday", "1d", {
     870.0f, 870.5f, 871.0f, 870.6f, 871.4f, 872.0f, 871.5f, 872.2f,
     873.0f, 872.8f, 873.5f, 874.0f, 873.6f, 874.2f, 875.0f, 874.8f,
     875.5f, 876.0f, 875.7f, 876.5f, 877.0f, 876.7f, 877.3f, 877.8f,
     878.0f, 877.5f, 878.2f, 878.7f, 879.0f, 879.5f
-  };
-  time_t now = std::time(nullptr);
-  int n = (int)h.closes.size();
-  h.timestamps.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    h.timestamps.push_back(now - (time_t)(n - 1 - i) * 60);
+  }, 60);
+}
+
+void seed_range_history(QuoteStore& store, const char* symbol, const char* range) {
+  String r(range ? range : "");
+  if (r == "1d") {
+    set_history(store, symbol, "intraday", "1d", {
+      875.0f, 875.4f, 875.1f, 876.0f, 876.5f, 876.1f, 877.0f, 877.4f,
+      878.0f, 878.3f, 878.9f, 879.5f
+    }, 60);
+  } else if (r == "5d") {
+    set_history(store, symbol, "daily", "5d", {
+      900.0f, 897.5f, 894.0f, 889.0f, 884.5f, 879.5f
+    }, 86400);
+  } else if (r == "1w") {
+    set_history(store, symbol, "daily", "1w", {
+      860.0f, 864.0f, 868.0f, 872.0f, 875.5f, 879.5f
+    }, 86400);
+  } else if (r == "1mo") {
+    set_history(store, symbol, "daily", "1mo", {
+      840, 845, 850, 848, 855, 860, 866, 870, 875, 879.5f
+    }, 86400);
+  } else if (r == "6mo") {
+    set_history(store, symbol, "daily", "6mo", {
+      940, 928, 915, 900, 892, 886, 880, 879.5f
+    }, 86400 * 7);
   }
-  store.setHistory(std::move(h));
 }
 
 }  // namespace fake_data

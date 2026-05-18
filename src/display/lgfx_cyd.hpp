@@ -64,9 +64,9 @@ class LGFX_CYD : public lgfx::LGFX_Device {
       cfg.freq            = 1000000;
       cfg.bus_shared      = false;
       cfg.offset_rotation = 0;
-      // Touch was mirrored 180° from the display in landscape (tapping the
-      // top-right corner registered at the bottom-right and vice versa).
-      // Swap min/max on both axes to invert them.
+      // Touch is mirrored 180° from the display in landscape. Keep both axes
+      // inverted here; UI widgets that need logical left/right correction
+      // handle that explicitly.
       cfg.x_min           = 3900;
       cfg.x_max           = 300;
       cfg.y_min           = 3850;

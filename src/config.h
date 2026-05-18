@@ -9,6 +9,8 @@ namespace cfg {
 // non-empty UA — see API_USER_AGENT.
 inline constexpr const char* API_BASE       = "https://rozakos.eu/stocks/api/v1";
 inline constexpr const char* API_USER_AGENT = "CYD-Stock-Ticker/1.0 (ESP32)";
+// Eastern European time with DST: UTC+2 winter, UTC+3 summer.
+inline constexpr const char* TIME_TZ        = "EET-2EEST,M3.5.0/3,M10.5.0/4";
 
 inline constexpr const char* DEFAULT_SYMBOLS =
     "AAPL,MSFT,NVDA,TSLA";   // 4 fits the screen without auto-scroll

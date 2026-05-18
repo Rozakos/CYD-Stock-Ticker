@@ -79,6 +79,20 @@ struct HtmlFileWriter {
   }
 };
 
+void tick_active_screen() {
+  if      (detail_screen::active())     detail_screen::tick();
+  else if (settings_screen::active())   settings_screen::tick();
+  else if (wifi_setup_screen::active()) wifi_setup_screen::tick();
+  else                                  list_screen::tick();
+}
+
+void service_sim_history(QuoteStore& store) {
+  HistoryRequest req;
+  if (store.takePendingHistory(req)) {
+    fake_data::seed_range_history(store, req.symbol.c_str(), req.range.c_str());
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -138,11 +152,8 @@ int main(int argc, char** argv) {
   // Warm-up: pump LVGL + the per-screen ticks so the UI fully renders before
   // we either snapshot or hand control to the event loop.
   for (int i = 0; i < args.warmup_ticks; ++i) {
-    // Always tick list so its rows are populated for when the user navigates to it.
-    if (args.screen == "list") list_screen::tick();
-    if (args.screen == "detail")   detail_screen::tick();
-    if (args.screen == "settings") settings_screen::tick();
-    if (args.screen == "wifi")     wifi_setup_screen::tick();
+    service_sim_history(store);
+    tick_active_screen();
     if (!sim_bridge::tick()) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
@@ -159,10 +170,8 @@ int main(int argc, char** argv) {
       // state changes from the click are picked up. Gate by the active
       // screen — list_screen::tick segfaults when the list isn't loaded.
       for (int i = 0; i < 5; ++i) {
-        if      (args.screen == "list")     list_screen::tick();
-        else if (args.screen == "detail")   detail_screen::tick();
-        else if (args.screen == "settings") settings_screen::tick();
-        else if (args.screen == "wifi")     wifi_setup_screen::tick();
+        service_sim_history(store);
+        tick_active_screen();
         sim_bridge::tick();
       }
     } else {
@@ -186,10 +195,8 @@ int main(int argc, char** argv) {
       // its row-rebuild path when the list isn't currently loaded
       // (sim/README.md "Known issues"). The warmup loop above already
       // gates this; the main loop has to as well.
-      if      (args.screen == "list")     list_screen::tick();
-      else if (args.screen == "detail")   detail_screen::tick();
-      else if (args.screen == "settings") settings_screen::tick();
-      else if (args.screen == "wifi")     wifi_setup_screen::tick();
+      service_sim_history(store);
+      tick_active_screen();
       next += std::chrono::milliseconds(16);
       std::this_thread::sleep_until(next);
     }

@@ -190,4 +190,6 @@ void tick() {
   refresh();
 }
 
+bool active() { return g_active; }
+
 }  // namespace settings_screen

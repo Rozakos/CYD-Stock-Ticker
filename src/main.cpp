@@ -75,6 +75,8 @@ void netTask(void*) {
   bool sta_services_up = false;
   auto bringUpStaServices = [&] {
     if (sta_services_up) return;
+    setenv("TZ", cfg::TIME_TZ, 1);
+    tzset();
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     web_admin::begin(&g_settings);
     xSemaphoreTake(g_lvglMu, portMAX_DELAY);

@@ -37,12 +37,12 @@ static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 // btnmatrix is `g_range_labels[]`; the value sent in `?range=` is
 // `g_range_api[]`. Keep both arrays in lock-step.
 static constexpr int kNumRanges       = 5;
-static constexpr int kDefaultRangeIdx = 0;     // "1D"
+static constexpr int kDefaultRangeIdx = 3;     // "1M"
 static const char* g_range_labels[] = {
-    "1D", "5D", "1M", "6M", "1Y", ""    // trailing "" terminates lv_buttonmatrix map
+    "1D", "5D", "1W", "1M", "6M", ""
 };
 static const char* g_range_api[kNumRanges] = {
-    "1d", "5d", "1mo", "6mo", "1y"
+    "1d", "5d", "1w", "1mo", "6mo"
 };
 
 static const char* kMonths[] = {
@@ -253,9 +253,16 @@ void build_once() {
     lv_label_set_text(lbl, g_range_labels[i]);
     lv_obj_center(lbl);
 
-    // Bake the index in at registration so each button uniquely owns it.
+    // Firmware touch X is mirrored by the panel calibration. Keep the sim's
+    // hit-test natural, but reverse the firmware user_data so a physical tap
+    // on the left-to-right visual button requests that same logical range.
+#if SIM_BUILD
+    int logical_idx = i;
+#else
+    int logical_idx = kNumRanges - 1 - i;
+#endif
     lv_obj_add_event_cb(b, on_range_clicked, LV_EVENT_CLICKED,
-                        (void*)(intptr_t)i);
+                        (void*)(intptr_t)logical_idx);
     g_range_btns[i] = b;
   }
 
@@ -366,6 +373,7 @@ float pick_step(float range) {
 
 void render_history(const History& h) {
   if (h.symbol != g_symbol || h.closes.empty()) return;
+  if (h.range.length() && h.range != g_range_api[g_pending_range_idx]) return;
   lv_obj_add_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
 
   float lo = h.closes.front(), hi = h.closes.front();
@@ -472,19 +480,14 @@ void render_history(const History& h) {
   float last  = h.closes.back();
   float first = h.closes.front();
   float chart_change = first != 0.0f ? (last - first) / first * 100.0f : 0.0f;
+  log_i("[ui] %s %s rendered: first=%.2f last=%.2f change=%+.2f%% pts=%lu",
+        g_symbol.c_str(), g_range_api[g_pending_range_idx],
+        first, last, chart_change, (unsigned long)h.closes.size());
 
-  // Direction comes from the symbol's published change_pct (same value the
-  // list-screen row uses for its +%/-% arrow and sparkline accent), not the
-  // chart-window slope — those can disagree, e.g. a stock down 2 % on the
-  // day but up over a 1-month chart. Falls back to the chart slope when
-  // the Quote isn't in the store yet (first frame, fresh boot).
+  // The detail header reflects the selected chart window. The list screen
+  // still shows the quote's published day change; here 5D/1W/1M/6M should
+  // show gain/loss from this history's first point to its last point.
   float change = chart_change;
-  for (const auto& q : g_store->snapshot()) {
-    if (q.symbol == g_symbol && q.fresh && !isnan(q.changePct)) {
-      change = q.changePct;
-      break;
-    }
-  }
   bool up = change >= 0;
 
   snprintf(buf, sizeof(buf), "%.2f", last);
@@ -623,7 +626,8 @@ void tick() {
 
   if (g_rendered) return;
   History h = g_store->history();
-  if (h.symbol == g_symbol && !h.closes.empty()) {
+  if (h.symbol == g_symbol && h.range == g_range_api[g_pending_range_idx] &&
+      !h.closes.empty()) {
     if (g_spinner)   lv_obj_add_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
     if (g_err_label) lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     render_history(h);
@@ -649,5 +653,7 @@ void tick() {
     }
   }
 }
+
+bool active() { return g_active; }
 
 }  // namespace detail_screen

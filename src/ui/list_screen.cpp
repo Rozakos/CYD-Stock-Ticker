@@ -90,10 +90,16 @@ void spark_fill_cb(lv_event_t* e) {
                            SPARK_H - 1, r.accent, LV_OPA_50);
 }
 
+void open_detail_async(void* user_data) {
+  const char* sym = static_cast<const char*>(user_data);
+  if (!sym) return;
+  detail_screen::show(g_store, sym);
+}
+
 void on_row_click(lv_event_t* e) {
   const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
   if (!sym) return;
-  detail_screen::show(g_store, sym);
+  lv_async_call(open_detail_async, (void*)sym);
 }
 
 Row make_row(lv_obj_t* parent, const String& symbol) {

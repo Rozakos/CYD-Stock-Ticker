@@ -188,6 +188,41 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Touch restore + range tap fix + local time + NOK/TTWO logos** (2026-05,
+  Codex): reverted the CYD touch calibration to the known-working mirrored
+  X/Y values (`x_min=3900`, `x_max=300`, `y_min=3850`, `y_max=200`) after a
+  normal-X experiment broke device touch. The detail range row remains
+  `1D / 5D / 1W / 1M / 6M` with 1M default; firmware reverses only the
+  range-button `user_data` mapping under non-sim builds so physical mirrored
+  taps request the visual button. Sim builds keep natural left-to-right
+  mapping; verified injected sim taps on 5D and 6M select the matching
+  buttons. Clock now sets `TZ=EET-2EEST,M3.5.0/3,M10.5.0/4` before NTP, so
+  the status bar uses EET/EEST local time instead of UTC. Added embedded NOK
+  (2023 wordmark from Wikimedia, not the old Nokia logo) and TTWO logos via
+  `data/logos/*.png` + regenerated `src/ui/logos_data.cpp`; flash is now
+  **95.4%**, so prefer a server-backed cached logo fetcher before embedding
+  many more symbols. Plain PowerShell did not have `cmake` on PATH, so
+  `sim/build_sim.ps1` now drives `C:\msys64\msys2_shell.cmd` directly and
+  `sim/README.md` uses that as the default sim build command. Sim note:
+  range-click injection works after `sim_lvgl_bridge.cpp` now advances time
+  between press/release frames; list-row injected navigation still appears
+  to hit a separate sim-only hang and was not used as the flashing gate.
+- **Detail range gain/loss fix** (2026-05, Codex): detail header percent and
+  up/down colour now come from the selected history window's first-to-last
+  change, not the quote's published day `change_pct`. This means tapping
+  `5D`, `1W`, `1M`, or `6M` displays that range's gain/loss. Follow-up
+  fix: `History` now carries the API `range`, and the detail screen renders
+  cached history only when both `symbol` and `range` match the pending tab;
+  this prevents stale same-symbol history from being rendered under a newly
+  selected tab before the network task returns. Serial diagnostics now log
+  both fetcher-side and UI-side first/last/change values:
+  `history <range>: interval=... pts=... first=... last=... change=...`.
+  The sim services pending history requests with per-range fake data so this
+  can be visually verified before flashing. Screenshots generated in
+  `sim/build/`: `range_guard_5d.png` (`-2.28%`),
+  `range_guard_1w.png` (`+2.27%`), `range_guard_1m.png` (`+4.70%`), and
+  `range_guard_6m.png` (`-6.44%`). If `History` or other shared structs
+  change again, run `.\sim\build_sim.ps1 -Clean` to avoid stale sim objects.
 - **Rozakos-branded `/settings` web admin + auth removal** (2026-05,
   Codex): ported the ESP8266 reference UI styling into
   `src/net/web_admin.cpp`: dark Rozakos Industries header, inline robot SVG,

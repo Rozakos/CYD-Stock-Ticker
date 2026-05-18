@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -177,10 +178,12 @@ void inject_click(int x, int y, int down_ms) {
   int press_ticks = down_ms < 20 ? 1 : down_ms / 20;
   for (int i = 0; i < press_ticks + 1; ++i) {
     lv_timer_handler();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   g_mouse_down = false;
   for (int i = 0; i < 4; ++i) {
     lv_timer_handler();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 }
 

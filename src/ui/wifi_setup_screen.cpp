@@ -112,4 +112,6 @@ void tick() {
   }
 }
 
+bool active() { return g_active; }
+
 }  // namespace wifi_setup_screen

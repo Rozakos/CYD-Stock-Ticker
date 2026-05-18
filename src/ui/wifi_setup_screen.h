@@ -11,5 +11,6 @@ void show(const String& ap_ssid, const String& ap_pass);
 // Refresh dynamic fields (status line). Safe to call when the screen
 // isn't current — it just no-ops.
 void tick();
+bool active();
 
 }  // namespace wifi_setup_screen

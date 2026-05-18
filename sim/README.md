@@ -19,9 +19,7 @@ C:\msys64\usr\bin\bash -lc "pacman -S --needed --noconfirm `
 ## Build & run
 
 ```powershell
-$env:PATH = 'C:\msys64\mingw64\bin;' + $env:PATH
-cmake -S sim -B sim/build -G Ninja
-cmake --build sim/build --target cyd_sim
+.\sim\build_sim.ps1
 
 cd sim/build
 .\cyd_sim.exe --window                                # interactive SDL window
