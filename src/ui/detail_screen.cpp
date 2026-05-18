@@ -60,7 +60,14 @@ bool        g_active     = false;
 bool        g_rendered   = false;
 bool        g_loading    = false;
 bool        g_showed_err = false;
-int         g_range_idx  = kDefaultRangeIdx;
+// g_range_idx = range currently DISPLAYED on the chart (what the chart's
+// data and the active-button highlight both reflect).
+// g_pending_range_idx = range the user most recently asked for; a fetch
+// for this range is in flight. The active highlight only catches up to
+// g_pending_range_idx once new data has rendered (or the user taps a
+// different range, replacing the request).
+int         g_range_idx          = kDefaultRangeIdx;
+int         g_pending_range_idx  = kDefaultRangeIdx;
 
 lv_obj_t* g_scr        = nullptr;
 lv_obj_t* g_card       = nullptr;
@@ -104,9 +111,13 @@ void on_range_clicked(lv_event_t* e) {
   // driver.
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   if (idx < 0 || idx >= kNumRanges) return;
-  if (idx == g_range_idx) return;
-  g_range_idx = idx;
-  apply_range_styles();
+  if (idx == g_range_idx) return;   // already on this range
+  // Do NOT commit g_range_idx yet — keep the previous range "active"
+  // visually so the highlighted button always matches the data on the
+  // chart. The new range becomes active in render_history once the new
+  // data has been drawn. start_history_fetch reads g_pending_range_idx
+  // for the API call.
+  g_pending_range_idx = idx;
   start_history_fetch();
 }
 
@@ -141,7 +152,7 @@ void start_history_fetch() {
   // briefly render stale labels at the old data's coordinates.
   if (g_marker_dot) lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
   g_fill_n = 0;
-  g_store->requestHistory(g_symbol, g_range_api[g_range_idx]);
+  g_store->requestHistory(g_symbol, g_range_api[g_pending_range_idx]);
 }
 
 // Area-fill is drawn by util::draw_polyline_fill (shared with the list
@@ -586,7 +597,8 @@ void show(QuoteStore* store, const String& symbol) {
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   // Reset range to default each time the user opens detail. Mark the
   // default button checked; clear all other CHECKED flags first.
-  g_range_idx = kDefaultRangeIdx;
+  g_range_idx         = kDefaultRangeIdx;
+  g_pending_range_idx = kDefaultRangeIdx;
   apply_range_styles();
   g_active = true;
   start_history_fetch();
@@ -597,10 +609,12 @@ void tick() {
   if (!g_active || !g_store) return;
 
   // Error state — pop the "no data" label, stop showing the spinner,
-  // leave buttons interactive for a retry. Stays sticky until the next
-  // requestHistory clears it.
+  // leave buttons interactive for a retry. Revert the pending range to
+  // the displayed one so a retap of the same button re-issues the fetch
+  // (dedupe in on_range_clicked compares against g_range_idx).
   if (g_loading && g_store->historyError()) {
     g_loading = false;
+    g_pending_range_idx = g_range_idx;
     if (g_spinner)   lv_obj_add_flag   (g_spinner,   LV_OBJ_FLAG_HIDDEN);
     if (g_err_label) lv_obj_remove_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     g_showed_err = true;
@@ -613,6 +627,10 @@ void tick() {
     if (g_spinner)   lv_obj_add_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
     if (g_err_label) lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     render_history(h);
+    // New data is on screen — commit the pending range as active. The
+    // highlighted button now matches what the chart shows.
+    g_range_idx = g_pending_range_idx;
+    apply_range_styles();
     g_loading  = false;
     g_rendered = true;
     return;
