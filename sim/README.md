@@ -28,6 +28,7 @@ cd sim/build
 .\cyd_sim.exe --headless --screen=list     --out=list.png
 .\cyd_sim.exe --headless --screen=detail   --symbol=AAPL --out=detail.png
 .\cyd_sim.exe --headless --screen=settings --out=settings.png
+.\cyd_sim.exe --web-settings=settings_web.html
 ```
 
 Flags:
@@ -40,6 +41,9 @@ Flags:
 - `--data=path` — root directory for LittleFS read overlay + LVGL drive `L:`.
   Defaults to `../../data` (i.e. project root `data/`) which matches running
   from `sim/build/`.
+- `--web-settings=path` renders the same Rozakos-branded web admin HTML used
+  by firmware `/settings` to a file, then exits. Open the generated HTML in a
+  browser to review the add/delete symbol table and settings form.
 
 ## How it's wired
 
@@ -47,6 +51,9 @@ Flags:
   `src/net/quote_store.cpp` and `src/settings/settings_store.cpp` are
   compiled into the sim verbatim. Display, networking, and main are
   swapped out.
+- **Same web-admin renderer as the firmware.** `--web-settings=...` calls
+  `src/net/web_admin_page.h`, which is also used by `src/net/web_admin.cpp`.
+  Keep web-admin markup there so firmware and browser previews do not drift.
 - **Arduino shim** lives in `sim/compat/` (`Arduino.h`, `WiFi.h`,
   `LittleFS.h`, `freertos/*`). Only the surface actually used by the
   files above is implemented. `String`, `millis`, `log_i`, FreeRTOS

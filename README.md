@@ -48,22 +48,26 @@ device IP. Open:
 http://<device-ip>/settings
 ```
 
-Default credentials: `admin / admin` (change them in the form on first visit).
+No login is required; `/settings` opens directly on the LAN. The page uses the
+Rozakos Industries dark theme with the robot mark, wordmark, and footer.
 
 The form lets you change:
 
-- API bearer token (leave blank to keep current)
-- Symbols (comma-separated, e.g. `AAPL,MSFT,NVDA`)
 - Refresh interval in seconds (minimum 15)
-- Admin username / password
+- API bearer token
+- Symbols through an add/delete table
 
 Changes persist to `/settings.json` and apply on the next refresh cycle — no
 reboot required.
 
+To preview the web admin without flashing, build the sim and run
+`cyd_sim.exe --web-settings=settings_web.html` from `sim/build/`, then open the
+generated HTML in a browser.
+
 ## Adding / removing tickers
 
-Use the web UI: `Symbols` field, comma-separated, e.g.
-`AAPL,MSFT,NVDA,TSLA,GOOG,AMZN`. Save. Next refresh picks up the new list.
+Use the web UI: add a ticker in the `Add symbol` form, or delete it from the
+symbols table. Next refresh picks up the new list.
 
 Brand colors for badges are baked into `src/ui/styles.cpp`
 (`kBrandTable` — AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META, NFLX, AMD, INTC,

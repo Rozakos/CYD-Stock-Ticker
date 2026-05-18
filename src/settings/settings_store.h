@@ -18,17 +18,13 @@ class SettingsStore {
   String        apiKey() const;
   uint32_t      refreshSeconds() const;
   std::vector<String> symbols() const;
-  String        adminUser() const;
-  String        adminPass() const;
   String        wifiSsid() const;
   String        wifiPass() const;
 
   // Atomic update from the web form. Persists to LittleFS.
   void update(const String& apiKey,
               uint32_t refreshSeconds,
-              const String& symbolsCsv,
-              const String& adminUser,
-              const String& adminPass);
+              const String& symbolsCsv);
 
   // Captive portal saves the user's home WiFi here.
   void setWifi(const String& ssid, const String& pass);
@@ -41,8 +37,6 @@ class SettingsStore {
   String   _apiKey;
   uint32_t _refresh = 60;
   String   _symbolsCsv;
-  String   _adminUser;
-  String   _adminPass;
   String   _wifiSsid;
   String   _wifiPass;
 };

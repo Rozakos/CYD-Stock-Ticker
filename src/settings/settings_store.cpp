@@ -40,8 +40,6 @@ void SettingsStore::load(const char* seedKey,
     _apiKey     = seedKey ? seedKey : "";
     _refresh    = cfg::DEFAULT_REFRESH_SECONDS;
     _symbolsCsv = cfg::DEFAULT_SYMBOLS;
-    _adminUser  = cfg::DEFAULT_ADMIN_USER;
-    _adminPass  = cfg::DEFAULT_ADMIN_PASS;
     _wifiSsid   = seedWifiSsid ? seedWifiSsid : "";
     _wifiPass   = seedWifiPass ? seedWifiPass : "";
   };
@@ -62,8 +60,6 @@ void SettingsStore::load(const char* seedKey,
       _apiKey     = doc["api_key"]     | (seedKey ? seedKey : "");
       _refresh    = doc["refresh_s"]   | cfg::DEFAULT_REFRESH_SECONDS;
       _symbolsCsv = doc["symbols"]     | cfg::DEFAULT_SYMBOLS;
-      _adminUser  = doc["admin_user"]  | cfg::DEFAULT_ADMIN_USER;
-      _adminPass  = doc["admin_pass"]  | cfg::DEFAULT_ADMIN_PASS;
       _wifiSsid   = doc["wifi_ssid"]   | (seedWifiSsid ? seedWifiSsid : "");
       _wifiPass   = doc["wifi_pass"]   | (seedWifiPass ? seedWifiPass : "");
     }
@@ -78,8 +74,6 @@ void SettingsStore::save() const {
   doc["api_key"]    = _apiKey;
   doc["refresh_s"]  = _refresh;
   doc["symbols"]    = _symbolsCsv;
-  doc["admin_user"] = _adminUser;
-  doc["admin_pass"] = _adminPass;
   doc["wifi_ssid"]  = _wifiSsid;
   doc["wifi_pass"]  = _wifiPass;
 
@@ -110,20 +104,6 @@ std::vector<String> SettingsStore::symbols() const {
   return split_csv(csv);
 }
 
-String SettingsStore::adminUser() const {
-  xSemaphoreTake(_mu, portMAX_DELAY);
-  String v = _adminUser;
-  xSemaphoreGive(_mu);
-  return v;
-}
-
-String SettingsStore::adminPass() const {
-  xSemaphoreTake(_mu, portMAX_DELAY);
-  String v = _adminPass;
-  xSemaphoreGive(_mu);
-  return v;
-}
-
 String SettingsStore::wifiSsid() const {
   xSemaphoreTake(_mu, portMAX_DELAY);
   String v = _wifiSsid;
@@ -148,17 +128,13 @@ void SettingsStore::setWifi(const String& ssid, const String& pass) {
 
 void SettingsStore::update(const String& apiKey,
                            uint32_t refreshSeconds,
-                           const String& symbolsCsv,
-                           const String& adminUser,
-                           const String& adminPass) {
+                           const String& symbolsCsv) {
   xSemaphoreTake(_mu, portMAX_DELAY);
-  if (apiKey.length())    _apiKey     = apiKey;
+  _apiKey = apiKey;
   _refresh   = refreshSeconds < cfg::MIN_REFRESH_SECONDS
                    ? cfg::MIN_REFRESH_SECONDS
                    : refreshSeconds;
-  if (symbolsCsv.length()) _symbolsCsv = symbolsCsv;
-  if (adminUser.length())  _adminUser  = adminUser;
-  if (adminPass.length())  _adminPass  = adminPass;
+  _symbolsCsv = symbolsCsv;
   save();
   xSemaphoreGive(_mu);
 }

@@ -13,6 +13,7 @@
 
 #include "../src/config.h"
 #include "../src/net/quote_store.h"
+#include "../src/net/web_admin_page.h"
 #include "../src/settings/settings_store.h"
 #include "../src/ui/detail_screen.h"
 #include "../src/ui/list_screen.h"
@@ -30,6 +31,7 @@ struct Args {
   int              warmup_ticks = 10;
   std::string      data_root    = "../../data";  // host path to logos (from sim/build/)
   std::string      click;          // "X,Y" — inject a tap after warmup
+  std::string      web_settings_out;  // dump /settings HTML and exit
   bool             intraday = false;   // override history with intraday data
 };
 
@@ -49,6 +51,7 @@ Args parse(int argc, char** argv) {
     else if (eat("--symbol", a.symbol)) {}
     else if (eat("--data",   a.data_root)) {}
     else if (eat("--click",  a.click)) {}
+    else if (eat("--web-settings", a.web_settings_out)) {}
     else if (s == "--intraday") a.intraday = true;
     else {
       std::string ticks_val;
@@ -64,10 +67,42 @@ Args parse(int argc, char** argv) {
   return a;
 }
 
+struct HtmlFileWriter {
+  std::FILE* fp = nullptr;
+
+  void print(const char* s) {
+    if (fp && s) std::fputs(s, fp);
+  }
+
+  void print(const String& s) {
+    print(s.c_str());
+  }
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
   Args args = parse(argc, argv);
+
+  if (!args.web_settings_out.empty()) {
+    LittleFS.read_overlay = args.data_root;
+    LittleFS.begin();
+
+    SettingsStore settings;
+    settings.begin("");
+
+    std::FILE* fp = std::fopen(args.web_settings_out.c_str(), "wb");
+    if (!fp) {
+      std::fprintf(stderr, "HTML write failed: %s\n", args.web_settings_out.c_str());
+      return 1;
+    }
+
+    HtmlFileWriter writer{fp};
+    web_admin_page::write_settings_page(writer, settings);
+    std::fclose(fp);
+    std::fprintf(stderr, "wrote %s\n", args.web_settings_out.c_str());
+    return 0;
+  }
 
   sim_bridge::init(args.mode, cfg::SCREEN_W, cfg::SCREEN_H, args.data_root);
 

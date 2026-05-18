@@ -51,7 +51,7 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 34.9%**, **Flash 94.0%**. DRAM is the constraint when
+Last clean build: **RAM 36.0%**, **Flash 94.5%**. DRAM is the constraint when
 adding LVGL features. Two main levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
@@ -83,7 +83,7 @@ src/
     quote_fetcher.{h,cpp}        fetchQuotes / fetchHistory. Filtered JSON.
     wifi_mgr.{h,cpp}             STA connect + open-AP fallback (CYD-Setup-XXXX)
     captive_portal.{h,cpp}       DNS hijack + AsyncWebServer /save for AP mode
-    web_admin.{h,cpp}            AsyncWebServer at /settings (basic auth)
+    web_admin.{h,cpp}            AsyncWebServer at /settings (no auth)
 
   settings/
     settings_store.{h,cpp}       LittleFS-backed runtime settings (incl. wifi creds)
@@ -169,6 +169,9 @@ software-rendered LVGL display. Two modes:
 - `--window`: SDL window for interactive testing.
 - `--headless --out=foo.png`: renders a few frames and dumps a PNG. This is
   the path Claude uses to *see* UI changes without flashing the device.
+- `--web-settings=foo.html`: renders the same `/settings` browser UI used by
+  firmware to a standalone HTML file. Open it in a browser to review web admin
+  changes without flashing.
 
 Toolchain is MSYS2 + MinGW + SDL2 (see `sim/README.md`). Build with
 `cmake -S sim -B sim/build -G Ninja && cmake --build sim/build`. Run from
@@ -185,6 +188,25 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Rozakos-branded `/settings` web admin + auth removal** (2026-05,
+  Codex): ported the ESP8266 reference UI styling into
+  `src/net/web_admin.cpp`: dark Rozakos Industries header, inline robot SVG,
+  split-pill ROZAKOS|INDUSTRIES wordmark, stock datalist autocomplete, and
+  matching footer. The UI now mirrors the ESP8266 add/remove flow for
+  symbols: a table with per-row delete buttons plus an Add symbol form
+  (`POST /add`, `POST /delete`), while the underlying setting remains the
+  same symbols CSV. The shared markup lives in `src/net/web_admin_page.h`;
+  firmware streams it from `web_admin.cpp`, and the sim can dump it with
+  `cyd_sim.exe --web-settings=settings_web.html`. The settings form is
+  refresh interval (minimum 15 s) and API bearer token only. HTTP basic auth
+  was removed entirely: no
+  `request->authenticate(...)`, no admin fields in the form, and
+  `SettingsStore` no longer reads/writes `admin_user` / `admin_pass` (legacy
+  keys in existing `/settings.json` are ignored). GET `/` now 303-redirects
+  to `/settings`; POST `/settings` saves then 303-redirects back. Verified
+  with `pio run -e cyd` (RAM 36.0%, Flash 94.5%),
+  `cmake --build sim/build --target cyd_sim`, and
+  `cyd_sim.exe --web-settings=settings_web.html`.
 - **Range buttons + interval-aware X axis** (2026-05): detail screen
   gained a 5-button `lv_buttonmatrix` (1D / 5D / 1W / 1M / 6M) between
   the header and the chart. Default checked button is **1M**;
@@ -399,10 +421,6 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
   shows wrong time, check that `configTime(tz_offset_sec, 0, "pool.ntp.org")`
   is called in `main.cpp` after WiFi connects. Currently no timezone is set;
   device runs UTC. Fix: call `configTime(3*3600, 0, ...)` for UTC+3 (Greece).
-- **Web admin access** (user asked): once the device is on WiFi, open a
-  browser to `http://<device-ip>/settings`. The IP is shown on the on-device
-  settings screen (gear icon in status bar). Basic-auth credentials are in
-  `src/net/web_admin.cpp` (`admin` / `password` by default — change these).
 - Long-press a row to mark it as a "favorite" / pin to top.
 - Switch to hourly bars (`interval=1h`) on a long-press of the chart.
 - Per-symbol price-alert thresholds in the settings form.

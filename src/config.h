@@ -14,10 +14,7 @@ inline constexpr const char* DEFAULT_SYMBOLS =
     "AAPL,MSFT,NVDA,TSLA";   // 4 fits the screen without auto-scroll
 
 inline constexpr uint32_t DEFAULT_REFRESH_SECONDS = 20;
-inline constexpr uint32_t MIN_REFRESH_SECONDS     = 10;
-
-inline constexpr const char* DEFAULT_ADMIN_USER = "admin";
-inline constexpr const char* DEFAULT_ADMIN_PASS = "admin";
+inline constexpr uint32_t MIN_REFRESH_SECONDS     = 15;
 
 inline constexpr const char* SETTINGS_PATH = "/settings.json";
 
