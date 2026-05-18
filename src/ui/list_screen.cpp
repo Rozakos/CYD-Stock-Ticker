@@ -8,6 +8,7 @@
 #include "../net/quote_store.h"
 #include "../settings/settings_store.h"
 #include "../util/area_fill.h"
+#include "../util/interpolate.h"
 #include "detail_screen.h"
 #include "logos.h"
 #include "settings_screen.h"
@@ -22,6 +23,12 @@ constexpr uint16_t LOGO_SIZE    = 38;
 constexpr uint16_t SPARK_W      = 96;
 constexpr uint16_t SPARK_H      = 28;
 constexpr uint16_t VISIBLE_ROWS = (cfg::SCREEN_H - STATUS_H) / (ROW_H + ROW_GAP);
+// PCHIP smoothing factor for the sparkline. Smaller than the detail
+// chart's factor (=5) because the row's plot area is only ~94 px wide;
+// finer interpolation has nothing to render into.
+constexpr int      SPARK_FACTOR  = 3;
+constexpr int      SPARK_MAX_OUT =
+    (cfg::SPARKLINE_POINTS - 1) * SPARK_FACTOR + 1;
 
 QuoteStore*    g_store    = nullptr;
 SettingsStore* g_settings = nullptr;
@@ -40,12 +47,13 @@ struct Row {
   lv_obj_t* price;
   lv_obj_t* pct;
   lv_obj_t* spark;
-  lv_point_precise_t spark_pts[cfg::SPARKLINE_POINTS];
+  // Sized for the PCHIP-smoothed output, not the raw close count.
+  lv_point_precise_t spark_pts[SPARK_MAX_OUT];
   // Snapshot of the spark points in int32 for the polygon-fill helper.
   // Kept in lock-step with spark_pts; the lv_line widget owns the curve
   // and we own the fill underneath.
-  int32_t    spark_xs[cfg::SPARKLINE_POINTS];
-  int32_t    spark_ys[cfg::SPARKLINE_POINTS];
+  int32_t    spark_xs[SPARK_MAX_OUT];
+  int32_t    spark_ys[SPARK_MAX_OUT];
   int        spark_n     = 0;
   // Single source of truth for the row's accent colour. Both the lv_line
   // stroke and the area-fill draw event read this field, so they can't
@@ -164,21 +172,30 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
     lv_obj_invalidate(r.spark);
     return;
   }
-  size_t n = closes.size();
-  if (n > cfg::SPARKLINE_POINTS) n = cfg::SPARKLINE_POINTS;
+  size_t n_in = closes.size();
+  if (n_in > cfg::SPARKLINE_POINTS) n_in = cfg::SPARKLINE_POINTS;
   float lo = closes.back(), hi = closes.back();
-  for (size_t i = closes.size() - n; i < closes.size(); ++i) {
+  for (size_t i = closes.size() - n_in; i < closes.size(); ++i) {
     if (closes[i] < lo) lo = closes[i];
     if (closes[i] > hi) hi = closes[i];
   }
   float span = hi - lo;
   if (span < 0.0001f) span = 1.0f;
 
+  // PCHIP smooth into a static buffer — same monotone cubic Hermite that
+  // the detail chart uses, so the two curves are visually consistent.
+  // factor=3 is enough for the ~94 px sparkline plot width.
+  int out_n = (int)(n_in - 1) * SPARK_FACTOR + 1;
+  if (out_n > SPARK_MAX_OUT) out_n = SPARK_MAX_OUT;
+  static float smooth[SPARK_MAX_OUT];
+  util::monotone_cubic_interpolate(&closes[closes.size() - n_in], n_in,
+                                   smooth, (size_t)out_n, SPARK_FACTOR);
+
   const lv_coord_t W = SPARK_W - 2;
   const lv_coord_t H = SPARK_H - 4;
-  for (size_t i = 0; i < n; ++i) {
-    float v = closes[closes.size() - n + i];
-    float t = (n == 1) ? 0.5f : (float)i / (float)(n - 1);
+  for (int i = 0; i < out_n; ++i) {
+    float v = smooth[i];
+    float t = (out_n == 1) ? 0.5f : (float)i / (float)(out_n - 1);
     float x = 1.0f + t * (float)W;
     float y = 2.0f + (1.0f - (v - lo) / span) * (float)H;
     r.spark_pts[i].x = (lv_value_precise_t)x;
@@ -186,12 +203,12 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
     r.spark_xs[i] = (int32_t)(x + 0.5f);
     r.spark_ys[i] = (int32_t)(y + 0.5f);
   }
-  r.spark_n = (int)n;
+  r.spark_n = out_n;
   // Both the stroke and the area-fill source their colour from r.accent —
   // matches the same accent the +%/-% label arrows use (styles::pct_up /
   // pct_dn via up_color() / dn_color()).
   r.accent = up ? styles::up_color() : styles::dn_color();
-  lv_line_set_points(r.spark, r.spark_pts, n);
+  lv_line_set_points(r.spark, r.spark_pts, out_n);
   lv_obj_set_style_line_color(r.spark, r.accent, 0);
   lv_obj_invalidate(r.spark);
 }
