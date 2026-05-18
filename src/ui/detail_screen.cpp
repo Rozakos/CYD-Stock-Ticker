@@ -460,7 +460,20 @@ void render_history(const History& h) {
 
   float last  = h.closes.back();
   float first = h.closes.front();
-  float change = first != 0.0f ? (last - first) / first * 100.0f : 0.0f;
+  float chart_change = first != 0.0f ? (last - first) / first * 100.0f : 0.0f;
+
+  // Direction comes from the symbol's published change_pct (same value the
+  // list-screen row uses for its +%/-% arrow and sparkline accent), not the
+  // chart-window slope — those can disagree, e.g. a stock down 2 % on the
+  // day but up over a 1-month chart. Falls back to the chart slope when
+  // the Quote isn't in the store yet (first frame, fresh boot).
+  float change = chart_change;
+  for (const auto& q : g_store->snapshot()) {
+    if (q.symbol == g_symbol && q.fresh && !isnan(q.changePct)) {
+      change = q.changePct;
+      break;
+    }
+  }
   bool up = change >= 0;
 
   snprintf(buf, sizeof(buf), "%.2f", last);
@@ -474,7 +487,13 @@ void render_history(const History& h) {
 
   lv_color_t c = up ? styles::up_color() : styles::dn_color();
   g_line_color = c;
-  lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
+  // Use lv_chart_set_series_color rather than the style approach — the
+  // series carries its own stored colour set at lv_chart_add_series time
+  // and the LV_PART_ITEMS line_color style does NOT override it for the
+  // series stroke. Going through the documented setter keeps the line
+  // colour in lock-step with g_line_color (which the polygon fill helper
+  // and the marker dot also consume).
+  lv_chart_set_series_color(g_chart, g_ser, c);
   // Refresh the active range button's bg colour to match the up/down accent.
   apply_range_styles();
 
