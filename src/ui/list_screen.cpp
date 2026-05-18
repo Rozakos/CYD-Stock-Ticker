@@ -44,10 +44,14 @@ struct Row {
   // Snapshot of the spark points in int32 for the polygon-fill helper.
   // Kept in lock-step with spark_pts; the lv_line widget owns the curve
   // and we own the fill underneath.
-  int32_t   spark_xs[cfg::SPARKLINE_POINTS];
-  int32_t   spark_ys[cfg::SPARKLINE_POINTS];
-  int       spark_n = 0;
-  String    symbol;
+  int32_t    spark_xs[cfg::SPARKLINE_POINTS];
+  int32_t    spark_ys[cfg::SPARKLINE_POINTS];
+  int        spark_n     = 0;
+  // Single source of truth for the row's accent colour. Both the lv_line
+  // stroke and the area-fill draw event read this field, so they can't
+  // drift apart through style-cascade quirks.
+  lv_color_t accent      = lv_color_hex(0x8a98ad);
+  String     symbol;
 };
 std::vector<Row> g_rows;
 
@@ -68,13 +72,14 @@ void spark_fill_cb(lv_event_t* e) {
 
   lv_area_t coords;
   lv_obj_get_coords(spark, &coords);
-  lv_color_t color = lv_obj_get_style_line_color(spark, LV_PART_MAIN);
   // Bottom of the polygon: just inside the obj's bottom edge so the
   // gradient runs the full sparkline height. SPARK_H - 1 matches what
-  // the inclusive lv_area_t expects.
+  // the inclusive lv_area_t expects. Colour comes from the row's
+  // `accent` field — same value used for the lv_line stroke, so the
+  // fill base colour cannot drift from the line colour.
   util::draw_polyline_fill(layer, r.spark_xs, r.spark_ys, r.spark_n,
                            coords.x1, coords.y1,
-                           SPARK_H - 1, color, LV_OPA_50);
+                           SPARK_H - 1, r.accent, LV_OPA_50);
 }
 
 void on_row_click(lv_event_t* e) {
@@ -182,9 +187,12 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
     r.spark_ys[i] = (int32_t)(y + 0.5f);
   }
   r.spark_n = (int)n;
+  // Both the stroke and the area-fill source their colour from r.accent —
+  // matches the same accent the +%/-% label arrows use (styles::pct_up /
+  // pct_dn via up_color() / dn_color()).
+  r.accent = up ? styles::up_color() : styles::dn_color();
   lv_line_set_points(r.spark, r.spark_pts, n);
-  lv_obj_set_style_line_color(
-      r.spark, up ? styles::up_color() : styles::dn_color(), 0);
+  lv_obj_set_style_line_color(r.spark, r.accent, 0);
   lv_obj_invalidate(r.spark);
 }
 
