@@ -76,6 +76,7 @@ lv_obj_t* g_spinner    = nullptr;
 lv_obj_t* g_err_label  = nullptr;
 lv_obj_t* g_y_labels[MAX_Y_TICKS]  = {};
 lv_obj_t* g_x_labels[X_TICK_COUNT] = {};
+lv_obj_t* g_range_btns[kNumRanges] = {};
 lv_obj_t* g_marker_dot   = nullptr;
 lv_color_t g_line_color  = lv_color_hex(0x4ade80);
 
@@ -92,14 +93,40 @@ void on_tap(lv_event_t*) {
 }
 
 void start_history_fetch();   // forward decl — used by on_range_clicked
+void apply_range_styles();    // forward decl — updates active button styling
 
 void on_range_clicked(lv_event_t* e) {
-  lv_obj_t* btns = (lv_obj_t*)lv_event_get_target(e);
-  uint32_t idx = lv_buttonmatrix_get_selected_button(btns);
-  if (idx >= (uint32_t)kNumRanges) return;
-  if ((int)idx == g_range_idx) return;
-  g_range_idx = (int)idx;
+  // user_data is the button index baked in at registration time. Using a
+  // baked-in index avoids any hit-test ambiguity that a single multi-cell
+  // widget (lv_buttonmatrix) introduced on the actual device, where the
+  // ButtonMatrix internal coords ended up mirrored relative to the touch
+  // driver.
+  int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  if (idx < 0 || idx >= kNumRanges) return;
+  if (idx == g_range_idx) return;
+  g_range_idx = idx;
+  apply_range_styles();
   start_history_fetch();
+}
+
+// Apply CHECKED-state visuals: active button gets the accent bg colour,
+// inactive ones get the muted card-frame colour. Called whenever
+// g_range_idx changes and when the up/down accent flips in render_history.
+void apply_range_styles() {
+  lv_color_t accent = g_line_color;
+  for (int i = 0; i < kNumRanges; ++i) {
+    lv_obj_t* b = g_range_btns[i];
+    if (!b) continue;
+    if (i == g_range_idx) {
+      lv_obj_set_style_bg_color(b, accent,          LV_PART_MAIN);
+      lv_obj_set_style_bg_opa  (b, LV_OPA_80,       LV_PART_MAIN);
+      lv_obj_set_style_text_color(b, lv_color_hex(0x0b0f17), LV_PART_MAIN);
+    } else {
+      lv_obj_set_style_bg_color(b, lv_color_hex(0x2a3548), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa  (b, LV_OPA_COVER,            LV_PART_MAIN);
+      lv_obj_set_style_text_color(b, lv_color_hex(0xe7eef7), LV_PART_MAIN);
+    }
+  }
 }
 
 void start_history_fetch() {
@@ -271,42 +298,42 @@ void build_once() {
   lv_obj_add_style(g_back_hint, &styles::muted, 0);
   lv_label_set_text(g_back_hint, LV_SYMBOL_LEFT " tap");
 
-  // Range button matrix lives between header and card.
-  static const char* range_map[] = {
-      g_range_labels[0], g_range_labels[1], g_range_labels[2],
-      g_range_labels[3], g_range_labels[4], ""
-  };
-  g_btn_row = lv_buttonmatrix_create(g_scr);
-  lv_buttonmatrix_set_map(g_btn_row, range_map);
-  lv_buttonmatrix_set_one_checked(g_btn_row, true);
-  for (int i = 0; i < kNumRanges; ++i) {
-    lv_buttonmatrix_set_button_ctrl(g_btn_row, i, LV_BUTTONMATRIX_CTRL_CHECKABLE);
-  }
-  lv_buttonmatrix_set_button_ctrl(g_btn_row, kDefaultRangeIdx,
-                                  LV_BUTTONMATRIX_CTRL_CHECKED);
+  // Range button row — 5 individual lv_button widgets inside a flex
+  // container. Each button's index is baked into its CLICKED event's
+  // user_data, so the index-to-API mapping cannot be confused by hit-
+  // test mirroring inside a multi-cell widget. (lv_buttonmatrix was
+  // previously used and reported mirrored clicks on the actual device
+  // even though it rendered LTR — switching to discrete buttons removes
+  // that whole class of bug.)
+  g_btn_row = lv_obj_create(g_scr);
+  lv_obj_remove_style_all(g_btn_row);
   lv_obj_set_size(g_btn_row, cfg::SCREEN_W - 16, BTN_ROW_H);
   lv_obj_align(g_btn_row, LV_ALIGN_TOP_LEFT, 0, HEADER_H + 2);
-  lv_obj_set_style_pad_all(g_btn_row, 1, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(g_btn_row, 2, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(g_btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(g_btn_row, 0, LV_PART_MAIN);
-  // Inactive button styling.
-  lv_obj_set_style_bg_color(g_btn_row, lv_color_hex(0x2a3548), LV_PART_ITEMS);
-  lv_obj_set_style_bg_opa  (g_btn_row, LV_OPA_COVER,            LV_PART_ITEMS);
-  lv_obj_set_style_radius  (g_btn_row, 4,                       LV_PART_ITEMS);
-  lv_obj_set_style_text_color(g_btn_row, lv_color_hex(0xe7eef7),   LV_PART_ITEMS);
-  lv_obj_set_style_text_font (g_btn_row, &lv_font_montserrat_12,    LV_PART_ITEMS);
-  lv_obj_set_style_border_width(g_btn_row, 0,                      LV_PART_ITEMS);
-  // Active (checked) styling. Bg color is refreshed in render_history
-  // to follow the up/down accent.
-  lv_obj_set_style_bg_color(g_btn_row, styles::up_color(),
-                            (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
-  lv_obj_set_style_bg_opa  (g_btn_row, LV_OPA_80,
-                            (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
-  lv_obj_set_style_text_color(g_btn_row, lv_color_hex(0x0b0f17),
-                              (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
-  lv_obj_add_event_cb(g_btn_row, on_range_clicked, LV_EVENT_VALUE_CHANGED,
-                      nullptr);
+  lv_obj_set_flex_flow(g_btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(g_btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(g_btn_row, 4, 0);
+  lv_obj_clear_flag(g_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  const int btn_w = ((cfg::SCREEN_W - 16) - 4 * (kNumRanges - 1)) / kNumRanges;
+  for (int i = 0; i < kNumRanges; ++i) {
+    lv_obj_t* b = lv_button_create(g_btn_row);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, btn_w, BTN_ROW_H);
+    lv_obj_set_style_radius(b, 4, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(b, &lv_font_montserrat_12, LV_PART_MAIN);
+
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_label_set_text(lbl, g_range_labels[i]);
+    lv_obj_center(lbl);
+
+    // Bake the index in at registration so each button uniquely owns it.
+    lv_obj_add_event_cb(b, on_range_clicked, LV_EVENT_CLICKED,
+                        (void*)(intptr_t)i);
+    g_range_btns[i] = b;
+  }
 
   g_card = lv_obj_create(g_scr);
   lv_obj_remove_style_all(g_card);
@@ -535,10 +562,8 @@ void render_history(const History& h) {
   lv_color_t c = up ? styles::up_color() : styles::dn_color();
   g_line_color = c;
   lv_obj_set_style_line_color(g_chart, c, LV_PART_ITEMS);
-  if (g_btn_row) {
-    lv_obj_set_style_bg_color(g_btn_row, c,
-        (lv_style_selector_t)LV_PART_ITEMS | LV_STATE_CHECKED);
-  }
+  // Refresh the active range button's bg colour to match the up/down accent.
+  apply_range_styles();
 
   // X-axis labels — three ticks at native indices [0, n/3, 2n/3] using
   // each point's own epoch. The format switches on the API-reported
@@ -630,13 +655,7 @@ void show(QuoteStore* store, const String& symbol) {
   // Reset range to default each time the user opens detail. Mark the
   // default button checked; clear all other CHECKED flags first.
   g_range_idx = kDefaultRangeIdx;
-  if (g_btn_row) {
-    for (int i = 0; i < kNumRanges; ++i) {
-      lv_buttonmatrix_clear_button_ctrl(g_btn_row, i, LV_BUTTONMATRIX_CTRL_CHECKED);
-    }
-    lv_buttonmatrix_set_button_ctrl(g_btn_row, kDefaultRangeIdx,
-                                    LV_BUTTONMATRIX_CTRL_CHECKED);
-  }
+  apply_range_styles();
   g_active = true;
   start_history_fetch();
   lv_screen_load(g_scr);
