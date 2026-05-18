@@ -57,11 +57,12 @@ void SettingsStore::load(const char* seedKey,
       defaults();
       needSave = true;
     } else {
-      _apiKey     = doc["api_key"]     | (seedKey ? seedKey : "");
-      _refresh    = doc["refresh_s"]   | cfg::DEFAULT_REFRESH_SECONDS;
-      _symbolsCsv = doc["symbols"]     | cfg::DEFAULT_SYMBOLS;
-      _wifiSsid   = doc["wifi_ssid"]   | (seedWifiSsid ? seedWifiSsid : "");
-      _wifiPass   = doc["wifi_pass"]   | (seedWifiPass ? seedWifiPass : "");
+      _apiKey        = doc["api_key"]     | (seedKey ? seedKey : "");
+      _refresh       = doc["refresh_s"]   | cfg::DEFAULT_REFRESH_SECONDS;
+      _symbolsCsv    = doc["symbols"]     | cfg::DEFAULT_SYMBOLS;
+      _favouritesCsv = doc["favourites"]  | "";
+      _wifiSsid      = doc["wifi_ssid"]   | (seedWifiSsid ? seedWifiSsid : "");
+      _wifiPass      = doc["wifi_pass"]   | (seedWifiPass ? seedWifiPass : "");
     }
   }
 
@@ -74,6 +75,7 @@ void SettingsStore::save() const {
   doc["api_key"]    = _apiKey;
   doc["refresh_s"]  = _refresh;
   doc["symbols"]    = _symbolsCsv;
+  doc["favourites"] = _favouritesCsv;
   doc["wifi_ssid"]  = _wifiSsid;
   doc["wifi_pass"]  = _wifiPass;
 
@@ -102,6 +104,49 @@ std::vector<String> SettingsStore::symbols() const {
   String csv = _symbolsCsv;
   xSemaphoreGive(_mu);
   return split_csv(csv);
+}
+
+std::vector<String> SettingsStore::favourites() const {
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  String csv = _favouritesCsv;
+  xSemaphoreGive(_mu);
+  return split_csv(csv);
+}
+
+bool SettingsStore::isFavourite(const String& symbol) const {
+  String upper = symbol;
+  upper.trim();
+  upper.toUpperCase();
+  if (!upper.length()) return false;
+  for (const auto& f : favourites()) {
+    if (f == upper) return true;
+  }
+  return false;
+}
+
+bool SettingsStore::toggleFavourite(const String& symbol) {
+  String upper = symbol;
+  upper.trim();
+  upper.toUpperCase();
+  if (!upper.length()) return false;
+
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  std::vector<String> favs = split_csv(_favouritesCsv);
+  bool was = false;
+  for (auto it = favs.begin(); it != favs.end(); ++it) {
+    if (*it == upper) { was = true; favs.erase(it); break; }
+  }
+  if (!was) favs.push_back(upper);
+
+  String csv;
+  for (size_t i = 0; i < favs.size(); ++i) {
+    if (i) csv += ',';
+    csv += favs[i];
+  }
+  _favouritesCsv = csv;
+  save();
+  xSemaphoreGive(_mu);
+  return !was;
 }
 
 String SettingsStore::wifiSsid() const {

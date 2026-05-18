@@ -21,6 +21,16 @@ class SettingsStore {
   String        wifiSsid() const;
   String        wifiPass() const;
 
+  // Favourites — symbols the user pinned to the top of the list via a
+  // long-press on the row. Stored as an upper-case CSV in
+  // /settings.json under "favourites". Order is preserved (first-pinned
+  // sorts first within the favourites block).
+  std::vector<String> favourites() const;
+  bool isFavourite(const String& symbol) const;
+  // Adds the symbol to favourites if absent, removes it if present.
+  // Returns the new state (true = is now favourite). Persists to LittleFS.
+  bool toggleFavourite(const String& symbol);
+
   // Atomic update from the web form. Persists to LittleFS.
   void update(const String& apiKey,
               uint32_t refreshSeconds,
@@ -37,6 +47,7 @@ class SettingsStore {
   String   _apiKey;
   uint32_t _refresh = 60;
   String   _symbolsCsv;
+  String   _favouritesCsv;
   String   _wifiSsid;
   String   _wifiPass;
 };

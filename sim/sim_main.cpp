@@ -31,6 +31,7 @@ struct Args {
   int              warmup_ticks = 10;
   std::string      data_root    = "../../data";  // host path to logos (from sim/build/)
   std::string      click;          // "X,Y" — inject a tap after warmup
+  std::string      longpress;       // "X,Y" — inject a long press (>~500 ms) after warmup
   std::string      web_settings_out;  // dump /settings HTML and exit
   bool             intraday = false;   // override history with intraday data
 };
@@ -51,6 +52,7 @@ Args parse(int argc, char** argv) {
     else if (eat("--symbol", a.symbol)) {}
     else if (eat("--data",   a.data_root)) {}
     else if (eat("--click",  a.click)) {}
+    else if (eat("--longpress", a.longpress)) {}
     else if (eat("--web-settings", a.web_settings_out)) {}
     else if (s == "--intraday") a.intraday = true;
     else {
@@ -133,7 +135,7 @@ int main(int argc, char** argv) {
 
   styles::init();
   settings_screen::init(&settings);
-  list_screen::build(&store);
+  list_screen::build(&store, &settings);
 
   // Pick which screen to land on.
   if (args.screen == "list") {
@@ -158,26 +160,29 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 
-  if (!args.click.empty()) {
+  auto inject_at = [&](const std::string& xy, int hold_ms, const char* label) {
     int cx = 0, cy = 0;
-    auto comma = args.click.find(',');
-    if (comma != std::string::npos) {
-      cx = std::atoi(args.click.substr(0, comma).c_str());
-      cy = std::atoi(args.click.substr(comma + 1).c_str());
-      std::fprintf(stderr, "[sim] inject click at %d,%d\n", cx, cy);
-      sim_bridge::inject_click(cx, cy);
-      // Tick the per-screen logic a few more times so any async fetch /
-      // state changes from the click are picked up. Gate by the active
-      // screen — list_screen::tick segfaults when the list isn't loaded.
-      for (int i = 0; i < 5; ++i) {
-        service_sim_history(store);
-        tick_active_screen();
-        sim_bridge::tick();
-      }
-    } else {
-      std::fprintf(stderr, "[sim] --click expects X,Y (got %s)\n", args.click.c_str());
+    auto comma = xy.find(',');
+    if (comma == std::string::npos) {
+      std::fprintf(stderr, "[sim] %s expects X,Y (got %s)\n", label, xy.c_str());
+      return;
     }
-  }
+    cx = std::atoi(xy.substr(0, comma).c_str());
+    cy = std::atoi(xy.substr(comma + 1).c_str());
+    std::fprintf(stderr, "[sim] inject %s at %d,%d (hold=%d ms)\n",
+                 label, cx, cy, hold_ms);
+    sim_bridge::inject_click(cx, cy, hold_ms);
+    for (int i = 0; i < 5; ++i) {
+      service_sim_history(store);
+      tick_active_screen();
+      sim_bridge::tick();
+    }
+  };
+
+  if (!args.click.empty())     inject_at(args.click,     60,  "--click");
+  // LVGL's long-press threshold defaults to 400 ms. 600 is comfortably above
+  // that with one tick of headroom for the timer to fire.
+  if (!args.longpress.empty()) inject_at(args.longpress, 600, "--longpress");
 
   if (!args.png_out.empty()) {
     if (sim_bridge::dump_png(args.png_out)) {

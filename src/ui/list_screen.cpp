@@ -96,10 +96,32 @@ void open_detail_async(void* user_data) {
   detail_screen::show(g_store, sym);
 }
 
+// Per-row long-press has to suppress the click that would otherwise fire
+// on release (LVGL fires both LONG_PRESSED and CLICKED for the same gesture
+// by default). The static flag is set when LONG_PRESSED fires and consumed
+// by the next CLICKED on the same row, then reset.
+bool g_swallow_next_click = false;
+// Set by the long-press handler — tick() picks this up and triggers the
+// reorder rebuild. We don't clean the list from inside the event handler
+// because LVGL would use-after-free the obj on dispatch return.
+bool g_favourites_dirty = false;
+
 void on_row_click(lv_event_t* e) {
+  if (g_swallow_next_click) {
+    g_swallow_next_click = false;
+    return;
+  }
   const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
   if (!sym) return;
   lv_async_call(open_detail_async, (void*)sym);
+}
+
+void on_row_long_press(lv_event_t* e) {
+  const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
+  if (!sym || !g_settings) return;
+  g_settings->toggleFavourite(sym);
+  g_swallow_next_click = true;
+  g_favourites_dirty   = true;
 }
 
 Row make_row(lv_obj_t* parent, const String& symbol) {
@@ -133,7 +155,14 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
 
   r.sym = lv_label_create(sym_col);
   lv_obj_add_style(r.sym, &styles::sym_small, 0);
-  lv_label_set_text(r.sym, symbol.c_str());
+  // "* " prefix marks favourites — Montserrat ships with the ASCII
+  // asterisk, no font rebuild needed.
+  if (g_settings && g_settings->isFavourite(symbol)) {
+    String marked = "* " + symbol;
+    lv_label_set_text(r.sym, marked.c_str());
+  } else {
+    lv_label_set_text(r.sym, symbol.c_str());
+  }
 
   r.spark = lv_line_create(r.obj);
   lv_obj_set_size(r.spark, SPARK_W, SPARK_H);
@@ -166,8 +195,11 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   lv_obj_add_style(r.pct, &styles::muted, 0);
   lv_label_set_text(r.pct, "—");
 
+  // heapSym lives forever — the obj retains it for the click handler and
+  // the long-press handler (both fire on the same row).
   char* heapSym = strdup(symbol.c_str());
-  lv_obj_add_event_cb(r.obj, on_row_click, LV_EVENT_CLICKED, heapSym);
+  lv_obj_add_event_cb(r.obj, on_row_click,      LV_EVENT_CLICKED,      heapSym);
+  lv_obj_add_event_cb(r.obj, on_row_long_press, LV_EVENT_LONG_PRESSED, heapSym);
   return r;
 }
 
@@ -219,7 +251,22 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
   lv_obj_invalidate(r.spark);
 }
 
-void rebuild_rows(const std::vector<Quote>& quotes) {
+void rebuild_rows(const std::vector<Quote>& quotes_in) {
+  // Stable-partition favourites to the front, preserving relative order in
+  // both halves so the rest of the list stays in its natural API order.
+  std::vector<Quote> quotes;
+  quotes.reserve(quotes_in.size());
+  if (g_settings) {
+    for (const auto& q : quotes_in) {
+      if (g_settings->isFavourite(q.symbol)) quotes.push_back(q);
+    }
+    for (const auto& q : quotes_in) {
+      if (!g_settings->isFavourite(q.symbol)) quotes.push_back(q);
+    }
+  } else {
+    quotes = quotes_in;
+  }
+
   bool same = quotes.size() == g_rows.size();
   for (size_t i = 0; same && i < quotes.size(); ++i) {
     if (quotes[i].symbol != g_rows[i].symbol) same = false;
@@ -403,6 +450,13 @@ void tick() {
   static time_t lastSeen = 0;
   auto quotes = g_store->snapshot();
   time_t lu = g_store->lastUpdate();
+  if (g_favourites_dirty) {
+    // Wipe rows so the next rebuild_rows call rebuilds in the new order
+    // (the symbol set is the same — just the partition order changed).
+    lv_obj_clean(g_list);
+    g_rows.clear();
+    g_favourites_dirty = false;
+  }
   if (lu != lastSeen || g_rows.size() != quotes.size()) {
     rebuild_rows(quotes);
     update_status(lu);
