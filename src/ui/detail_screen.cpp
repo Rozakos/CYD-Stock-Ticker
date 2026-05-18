@@ -512,10 +512,15 @@ void render_history(const History& h) {
   apply_range_styles();
 
   // X-axis labels — three ticks at native indices [0, n/3, 2n/3] using
-  // each point's own epoch. The format switches on the API-reported
-  // interval: "intraday" → HH:MM (gmtime, no local TZ on device),
-  // anything else → DD MMM (English month from kMonths).
-  bool intraday = (h.interval == "intraday");
+  // each point's own epoch. The format switches on the REQUESTED range
+  // (the user's mental model), NOT the API's `interval` field. For 5d
+  // the backend returns intraday-resolution data spanning 5 calendar
+  // days; the three sampled hours come from 3 different days and look
+  // random ("18:00 16:30 15:00"). Anything wider than 1d → DD MMM so
+  // the day component is actually visible. 1d → HH:MM (intraday
+  // resolution within a single trading day, gmtime; no local TZ on
+  // device).
+  bool intraday = (h.range == "1d");
   int n_native = n;
   int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
   time_t now = time(nullptr);

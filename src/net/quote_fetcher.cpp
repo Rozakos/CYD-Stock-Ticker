@@ -160,10 +160,27 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
     return false;
   }
 
+  // Downsample (don't truncate) when the API returns more points than the
+  // chart can hold. The earlier "drop the head, keep the tail" approach
+  // collapsed a 6-month daily series (~120 pts) into the last ~30 days,
+  // which made the 6M tab show the same date window as 1M. Uniform-index
+  // sampling preserves the first and last points (so the displayed gain
+  // / loss percentage matches the full requested window) and spaces the
+  // rest evenly across the original time range.
   if (closes.size() > cfg::HISTORY_POINTS) {
-    size_t drop = closes.size() - cfg::HISTORY_POINTS;
-    closes.erase(closes.begin(), closes.begin() + drop);
-    timestamps.erase(timestamps.begin(), timestamps.begin() + drop);
+    const size_t total = closes.size();
+    const size_t kept  = cfg::HISTORY_POINTS;
+    std::vector<float>  ds_closes;
+    std::vector<time_t> ds_ts;
+    ds_closes.reserve(kept);
+    ds_ts.reserve(kept);
+    for (size_t i = 0; i < kept; ++i) {
+      size_t src = (i * (total - 1)) / (kept - 1);
+      ds_closes.push_back(closes[src]);
+      ds_ts.push_back(timestamps[src]);
+    }
+    closes     = std::move(ds_closes);
+    timestamps = std::move(ds_ts);
   }
 
   float first = closes.front();

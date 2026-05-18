@@ -95,9 +95,19 @@ void seed_range_history(QuoteStore& store, const char* symbol, const char* range
       878.0f, 878.3f, 878.9f, 879.5f
     }, 60);
   } else if (r == "5d") {
-    set_history(store, symbol, "daily", "5d", {
-      900.0f, 897.5f, 894.0f, 889.0f, 884.5f, 879.5f
-    }, 86400);
+    // Real backend returns intraday-resolution data for 5d (handful of
+    // candles per day). Model that — interval="intraday" with
+    // 6-hour spacing across 5 calendar days. The detail screen MUST
+    // still render DD MMM labels here (driven by `range`, not by
+    // `interval`); the previous regression printed HH:MM with three
+    // unrelated hour-of-day stamps.
+    set_history(store, symbol, "intraday", "5d", {
+      900.0f, 901.2f, 898.5f, 897.0f,
+      895.0f, 896.5f, 894.0f, 892.5f,
+      890.0f, 888.5f, 887.0f, 885.5f,
+      884.0f, 883.5f, 881.5f, 880.0f,
+      879.5f, 881.0f, 879.5f, 879.5f
+    }, 21600);
   } else if (r == "1w") {
     set_history(store, symbol, "daily", "1w", {
       860.0f, 864.0f, 868.0f, 872.0f, 875.5f, 879.5f
@@ -107,9 +117,16 @@ void seed_range_history(QuoteStore& store, const char* symbol, const char* range
       840, 845, 850, 848, 855, 860, 866, 870, 875, 879.5f
     }, 86400);
   } else if (r == "6mo") {
+    // ~6 months of daily-ish data — 30 points at one-week spacing covers
+    // roughly Nov..May. Demonstrates the fetcher's downsampling result
+    // shape: a 6-month chart whose first tick is genuinely months earlier
+    // than the last (the previous bug rendered 6M with only ~30 days
+    // spanned because the fetcher kept the tail and dropped the head).
     set_history(store, symbol, "daily", "6mo", {
-      940, 928, 915, 900, 892, 886, 880, 879.5f
-    }, 86400 * 7);
+      980, 972, 965, 955, 948, 942, 935, 930, 924, 918,
+      915, 910, 905, 902, 898, 894, 890, 886, 884, 880,
+      878, 875, 872, 870, 869, 873, 876, 878, 880, 879.5f
+    }, 86400 * 6);
   }
 }
 
