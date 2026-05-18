@@ -482,11 +482,6 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Likely next asks
 
-- **Fix the time display** (user asked but not yet implemented): the status
-  bar clock (`list_screen.cpp`) shows NTP time via `time(nullptr)`. If it
-  shows wrong time, check that `configTime(tz_offset_sec, 0, "pool.ntp.org")`
-  is called in `main.cpp` after WiFi connects. Currently no timezone is set;
-  device runs UTC. Fix: call `configTime(3*3600, 0, ...)` for UTC+3 (Greece).
 - Long-press a row to mark it as a "favorite" / pin to top.
 - Switch to hourly bars (`interval=1h`) on a long-press of the chart.
 - Per-symbol price-alert thresholds in the settings form.
