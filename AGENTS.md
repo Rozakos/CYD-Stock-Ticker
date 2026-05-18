@@ -106,9 +106,17 @@ src/
   The fetcher requests `limit=SPARKLINE_POINTS` daily bars per symbol and the
   last N closes get stored on `Quote::sparkline`. The list draws them with
   `lv_line` (one per row) — no extra API calls.
-- **Detail history**: separate on-demand fetch (`limit=HISTORY_POINTS`) when
-  a row is tapped. Pending request flows UI -> store -> net via
-  `requestHistory` / `takePendingHistory`.
+- **Detail history / range contract**: range buttons request
+  `/history/{SYMBOL}?range=<token>` where tokens are `1d`, `5d`, `1w`,
+  `1mo`, and `6mo`. The API server is responsible for selecting the
+  correct date/window and returning ordered `points[]` with `ts` and `last`
+  plus top-level `interval` (`intraday` or `daily`). The firmware does not
+  calculate which dates belong to "1W" or fetch from Google/Yahoo directly.
+  It calculates the displayed detail gain/loss locally from the returned
+  points only: `(last_point.last - first_point.last) / first_point.last *
+  100`. Pending request flows UI -> store -> net via `requestHistory` /
+  `takePendingHistory`; `History::range` must match the pending tab before
+  the UI renders it.
 - **Logos**: `logos::make(parent, sym, size)` first looks up an embedded
   ARGB8888 `lv_image_dsc_t` via `logos_data::find(symbol)`
   (`src/ui/logos_data.{cpp,h}`, generated from `data/logos/*.png` by
@@ -122,6 +130,29 @@ src/
 - **Settings screen**: read-only. Editing happens in the web admin (no
   on-device keyboard). The screen pulls live WiFi info each tick and
   exposes the `http://<ip>/` URL so the user knows where to go.
+
+## Debugging Range Percentages
+
+If a tab like `1W` on `AMD` shows a surprising gain/loss, first inspect the
+serial logs rather than changing the UI math. The firmware logs the exact
+history data it used:
+
+```
+[AMD] history 1w: interval=daily pts=... first=... last=... change=... ts=.....
+[ui] AMD 1w rendered: first=... last=... change=... pts=...
+```
+
+Interpretation:
+
+- If fetcher and UI logs match, the device is calculating correctly from the
+  API payload; check the stock-api server's `range=1w` window/adjusted price
+  semantics.
+- If fetcher and UI logs differ, suspect stale cached history, generation
+  cancellation, or `History::range` matching.
+- For `1M`, a recent mismatch example was device showing `+90.04%` while
+  Google showed roughly `+53.12%`; that kind of spread is likely a server
+  history window or price-adjustment issue unless the serial first/last
+  values differ from what the API returns.
 
 ## Build / verify
 
