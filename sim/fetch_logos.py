@@ -2,8 +2,11 @@
 
 Source: https://github.com/nvstly/icons (MIT, white-foreground on transparent
 for most US tickers; some are full-color brand marks). Output: 48x48 RGBA
-PNGs in data/logos/ — small enough that ~25 tickers fit comfortably in the
-128 KB LittleFS partition with 4 KB block overhead.
+PNGs in sim/logo_src/ — these are build-time input for
+sim/build_logo_arrays.py, which compiles them into src/ui/logos_data.cpp
+as ARGB8888 lv_image_dsc_t. The PNGs are NOT written into the device's
+LittleFS partition (192 KB total, needs to stay near-empty so runtime
+logo fetches have room to land).
 
 Run from the project root:  python sim/fetch_logos.py
 """
@@ -28,7 +31,7 @@ TICKERS = [
 ]
 
 BASE = "https://raw.githubusercontent.com/nvstly/icons/main/ticker_icons/{0}.png"
-OUT  = "data/logos"
+OUT  = "sim/logo_src"
 SIZE = 48
 
 def download(ticker: str) -> bytes | None:

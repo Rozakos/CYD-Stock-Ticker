@@ -1,8 +1,15 @@
-"""Convert data/logos/*.png into a single C source file with embedded
+"""Convert sim/logo_src/*.png into a single C source file with embedded
 lv_image_dsc_t entries (ARGB8888). The output goes to
 src/ui/logos_data.cpp/.h and is compiled into both the firmware and the
 sim, so logo rendering works identically without the LVGL FS / lodepng
 path.
+
+The source PNGs deliberately live outside `data/` because anything inside
+`data/` ends up packaged into the device's LittleFS partition (only 192 KB
+on min_spiffs) — and those PNGs are pure build-time input, never read at
+runtime. Putting them in `sim/logo_src` keeps the LittleFS image small
+enough that runtime-fetched logos have room to land without wedging the
+allocator.
 
 Run from the project root: python sim/build_logo_arrays.py
 """
@@ -11,7 +18,7 @@ import os
 import sys
 from PIL import Image
 
-SRC = "data/logos"
+SRC = "sim/logo_src"
 OUT_DIR = "src/ui"
 OUT_C   = os.path.join(OUT_DIR, "logos_data.cpp")
 OUT_H   = os.path.join(OUT_DIR, "logos_data.h")
@@ -29,7 +36,7 @@ def emit_array(out, var, data: bytes):
 def main():
     pngs = sorted(f for f in os.listdir(SRC) if f.lower().endswith(".png"))
     if not pngs:
-        print("no PNGs found in data/logos/", file=sys.stderr)
+        print(f"no PNGs found in {SRC}/", file=sys.stderr)
         sys.exit(1)
 
     entries = []

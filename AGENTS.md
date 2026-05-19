@@ -119,14 +119,19 @@ src/
   the UI renders it.
 - **Logos**: `logos::make(parent, sym, size)` first looks up an embedded
   ARGB8888 `lv_image_dsc_t` via `logos_data::find(symbol)`
-  (`src/ui/logos_data.{cpp,h}`, generated from `data/logos/*.png` by
+  (`src/ui/logos_data.{cpp,h}`, generated from `sim/logo_src/*.png` by
   `sim/build_logo_arrays.py`). If the symbol isn't bundled, it falls
   back to a runtime LittleFS PNG read (`L:/logos/<SYMBOL>.png`), then to
   a circular brand-colored letter badge. The embedded path works
   identically on the device and in the sim because it skips the LVGL FS
   + lodepng pipeline that the sim's software flush doesn't render
-  visually. To add or refresh logos: drop PNGs into `data/logos/` and
+  visually. To add or refresh logos: drop PNGs into `sim/logo_src/` and
   run `python sim/build_logo_arrays.py` from the project root.
+  - **`data/` MUST stay near-empty.** The min_spiffs partition is only
+    192 KB. Anything in `data/` gets baked into the LittleFS image at
+    `uploadfs` time, leaving little room for runtime-fetched logos. The
+    source PNGs that drive `build_logo_arrays.py` deliberately live in
+    `sim/logo_src/` (NOT `data/logos/`) for this reason.
 - **Settings screen**: read-only. Editing happens in the web admin (no
   on-device keyboard). The screen pulls live WiFi info each tick and
   exposes the `http://<ip>/` URL so the user knows where to go.

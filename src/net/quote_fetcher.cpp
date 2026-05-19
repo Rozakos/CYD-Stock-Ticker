@@ -161,6 +161,28 @@ bool fetchLogo(const String& symbol, const String& token) {
   {
     // Held only across the (fast) write + rename — never the HTTP recv.
     fs_littlefs::Guard g;
+
+    // Bail out if the partition is too close to full. The Arduino
+    // LittleFS allocator divides by `lfs->cfg->block_count` and the
+    // partition can wedge into a state where that field reads back as
+    // 0 after a failed allocation — the next allocation crashes the
+    // firmware with EXCCAUSE 6 (IntegerDivideByZero) deep inside
+    // lfs_alloc. We've decoded that trace already; the only way out
+    // is to never trigger an allocation when there's no headroom.
+    // Conservative threshold: refuse the write if less than the body
+    // size + 8 KB slack is free.
+    size_t total = LittleFS.totalBytes();
+    size_t used  = LittleFS.usedBytes();
+    size_t avail = (total > used) ? (total - used) : 0;
+    if (avail < body.size() + 8192) {
+      log_w("[logo] %s skip (fs full: avail=%u total=%u, need=%u)",
+            symbol.c_str(), (unsigned)avail, (unsigned)total,
+            (unsigned)(body.size() + 8192));
+      return false;
+    }
+    log_i("[logo] %s fs.space avail=%u total=%u",
+          symbol.c_str(), (unsigned)avail, (unsigned)total);
+
     log_i("[logo] %s fs.mkdir", symbol.c_str());
     LittleFS.mkdir("/logos");
     log_i("[logo] %s fs.remove_tmp", symbol.c_str());

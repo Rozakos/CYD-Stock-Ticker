@@ -83,7 +83,9 @@ class LittleFSStub {
   // Writable root (settings). Created on begin().
   static constexpr const char* kRoot = "sim_data";
   // Optional read-only overlay searched for files missing from kRoot
-  // (lets the sim pick up data/logos/ without copying).
+  // (sim_main points it at the project root so /logos/<sym>.png lookups
+  // can find sim/logo_src/<sym>.png as a fallback if anything still
+  // tries that path).
   std::string read_overlay;
 
   bool begin(bool /*format_if_failed*/ = false) {
