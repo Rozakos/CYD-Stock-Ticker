@@ -219,6 +219,25 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Runtime logo fetch + diagnostic mode** (2026-05, Codex): firmware now
+  downloads missing, non-embedded logos from `/logo/{SYMBOL}` into
+  LittleFS as `/logos/<SYMBOL>.png`, then the existing UI fallback renders
+  them via `L:/logos/<SYMBOL>.png`. Embedded symbols are skipped so flash
+  logos do not waste API calls. Runtime logo rows rebuild their logo widget
+  on quote refresh so a badge can switch to a cached PNG without reboot.
+  **Temporary diagnostic is enabled** in
+  `src/net/quote_fetcher.cpp::kLogoApiTestMode`, appending `?test=1` to
+  non-embedded logo requests. Revert this to `false` after confirming
+  whether the CYD renders the stock-api synthetic red/green/blue PNG.
+  Runtime PNGs are wrapped in a neutral gray circular backing with a light
+  border while debugging logo contrast/rendering. Serial logs of interest:
+  `[SYMBOL] logo cached: ...`, `[logo] SYMBOL LittleFS ... dims=...`, and
+  `[logo] SYMBOL runtime image mounted ...`.
+- **Captive portal watchdog fix + onboarding logs** (2026-05, Codex):
+  moved `WiFi.scanNetworks()` out of AsyncWebServer request callbacks after
+  phones joining `CYD-Setup-*` triggered `async_tcp` task watchdog resets.
+  The portal now scans once before `server.begin()` and logs AP/STA
+  transitions, captive probes, `/`, `/save`, and reconnect attempts.
 - **Touch restore + range tap fix + local time + NOK/TTWO logos** (2026-05,
   Codex): reverted the CYD touch calibration to the known-working mirrored
   X/Y values (`x_min=3900`, `x_max=300`, `y_min=3850`, `y_max=200`) after a
@@ -482,11 +501,6 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Likely next asks
 
-- **Fix the time display** (user asked but not yet implemented): the status
-  bar clock (`list_screen.cpp`) shows NTP time via `time(nullptr)`. If it
-  shows wrong time, check that `configTime(tz_offset_sec, 0, "pool.ntp.org")`
-  is called in `main.cpp` after WiFi connects. Currently no timezone is set;
-  device runs UTC. Fix: call `configTime(3*3600, 0, ...)` for UTC+3 (Greece).
 - Long-press a row to mark it as a "favorite" / pin to top.
 - Switch to hourly bars (`interval=1h`) on a long-press of the chart.
 - Per-symbol price-alert thresholds in the settings form.

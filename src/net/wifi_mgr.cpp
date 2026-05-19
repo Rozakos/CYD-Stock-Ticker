@@ -22,7 +22,12 @@ String makeApSsid() {
 }
 
 bool tryStaConnect(const String& ssid, const String& pass) {
-  if (!ssid.length()) return false;
+  if (!ssid.length()) {
+    log_i("[wifi] no STA ssid configured");
+    return false;
+  }
+  log_i("[wifi] trying STA ssid='%s' pass_len=%u",
+        ssid.c_str(), (unsigned)pass.length());
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
@@ -32,7 +37,14 @@ bool tryStaConnect(const String& ssid, const String& pass) {
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
     vTaskDelay(pdMS_TO_TICKS(250));
   }
-  return WiFi.status() == WL_CONNECTED;
+  bool ok = WiFi.status() == WL_CONNECTED;
+  if (ok) {
+    log_i("[wifi] STA connected ip=%s rssi=%d",
+          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  } else {
+    log_w("[wifi] STA connect failed status=%d", (int)WiFi.status());
+  }
+  return ok;
 }
 
 void startAp() {
@@ -42,8 +54,11 @@ void startAp() {
   // worse UX than a transient open AP for setup only.
   g_ap_pass = "";
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(g_ap_ssid.c_str(), g_ap_pass.length() ? g_ap_pass.c_str() : nullptr);
+  log_i("[wifi] starting setup AP ssid='%s'", g_ap_ssid.c_str());
+  bool ok = WiFi.softAP(g_ap_ssid.c_str(), g_ap_pass.length() ? g_ap_pass.c_str() : nullptr);
   g_ap_active = true;
+  log_i("[wifi] setup AP %s ip=%s",
+        ok ? "started" : "failed", WiFi.softAPIP().toString().c_str());
 }
 
 }  // namespace
@@ -54,6 +69,7 @@ void begin(SettingsStore& settings) {
 }
 
 void retrySta(SettingsStore& settings) {
+  log_i("[wifi] retry STA requested; stopping setup AP");
   WiFi.softAPdisconnect(true);
   g_ap_active = false;
   if (!tryStaConnect(settings.wifiSsid(), settings.wifiPass())) {

@@ -3,16 +3,37 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <LittleFS.h>
 #include <WiFiClientSecure.h>
 
 #include <time.h>
 #include <vector>
 
 #include "../config.h"
+#include "../display/fs_littlefs.h"
 #include "../settings/settings_store.h"
+#include "../ui/logos_data.h"
 #include "quote_store.h"
 
 namespace {
+
+// Temporary diagnostic: ask stock-api for a synthetic red/green/blue PNG
+// for any non-embedded logo. If this renders, runtime PNG drawing works and
+// real logos need API-side contrast normalization.
+static constexpr bool kLogoApiTestMode = true;
+
+String logoPath(const String& symbol) {
+  String s = symbol;
+  s.toUpperCase();
+  String clean;
+  clean.reserve(s.length());
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) clean += c;
+    else clean += '_';
+  }
+  return String("/logos/") + clean + ".png";
+}
 
 bool fetchAndParse(const String& url, const String& token,
                    const JsonDocument& filter, JsonDocument& doc) {
@@ -46,6 +67,106 @@ bool fetchAndParse(const String& url, const String& token,
     return false;
   }
   return true;
+}
+
+bool logoExists(const String& path) {
+  fs_littlefs::Guard g;
+  return LittleFS.exists(path);
+}
+
+bool fetchLogo(const String& symbol, const String& token) {
+  if (logos_data::find(symbol.c_str())) return true;
+
+  String path = logoPath(symbol);
+  if (logoExists(path)) return true;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.setReuse(false);
+
+  String url = String(cfg::API_BASE) + "/logo/" + symbol;
+  if (kLogoApiTestMode) url += "?test=1";
+  if (!http.begin(client, url)) return false;
+  http.useHTTP10(true);
+  http.addHeader("Accept-Encoding", "identity");
+  http.addHeader("User-Agent", cfg::API_USER_AGENT);
+  if (token.length()) http.addHeader("Authorization", String("Bearer ") + token);
+
+  int code = http.GET();
+  if (code != 200) {
+    log_w("[%s] logo HTTP %d", symbol.c_str(), code);
+    http.end();
+    return false;
+  }
+
+  String tmp = path + ".tmp";
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[512];
+  size_t total = 0;
+  bool ok = true;
+
+  {
+    fs_littlefs::Guard g;
+    LittleFS.mkdir("/logos");
+    LittleFS.remove(tmp);
+    File f = LittleFS.open(tmp, "w");
+    if (!f) {
+      log_w("[%s] logo cache open failed", symbol.c_str());
+      http.end();
+      return false;
+    }
+
+    uint32_t lastData = millis();
+    while (http.connected() && millis() - lastData < 10000) {
+      int avail = stream->available();
+      if (!avail) {
+        delay(1);
+        continue;
+      }
+      size_t want = avail < (int)sizeof(buf) ? (size_t)avail : sizeof(buf);
+      int got = stream->readBytes(buf, want);
+      if (got <= 0) break;
+      lastData = millis();
+
+      if (f.write(buf, got) != (size_t)got) {
+        ok = false;
+        break;
+      }
+      total += (size_t)got;
+      if (total > 65536) {
+        log_w("[%s] logo too large", symbol.c_str());
+        ok = false;
+        break;
+      }
+    }
+
+    f.close();
+    if (ok && total > 8) {
+      uint8_t sig[8] = {};
+      File r = LittleFS.open(tmp, "r");
+      ok = r && r.read(sig, sizeof(sig)) == sizeof(sig) &&
+           sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' &&
+           sig[3] == 'G' && sig[4] == '\r' && sig[5] == '\n' &&
+           sig[6] == 0x1a && sig[7] == '\n';
+      if (r) r.close();
+    } else {
+      ok = false;
+    }
+
+    if (ok) {
+      LittleFS.remove(path);
+      ok = LittleFS.rename(tmp, path);
+    } else {
+      LittleFS.remove(tmp);
+    }
+  }
+
+  http.end();
+  if (ok) log_i("[%s] logo cached: %u bytes", symbol.c_str(), (unsigned)total);
+  else    log_w("[%s] logo cache failed", symbol.c_str());
+  return ok;
 }
 
 }  // namespace
@@ -95,6 +216,7 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
       }
     }
     out.push_back(q);
+    fetchLogo(sym, token);
     vTaskDelay(pdMS_TO_TICKS(150));  // gentle on the API between calls
   }
 

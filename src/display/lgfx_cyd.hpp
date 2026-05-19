@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef LGFX_USE_V1
 #define LGFX_USE_V1
+#endif
 #include <LovyanGFX.hpp>
 
 // ESP32-2432S028R v2/v3 (dual-USB) "Cheap Yellow Display" — ST7789 on HSPI,
