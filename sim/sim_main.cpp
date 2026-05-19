@@ -17,6 +17,7 @@
 #include "../src/settings/settings_store.h"
 #include "../src/ui/detail_screen.h"
 #include "../src/ui/list_screen.h"
+#include "../src/ui/logos.h"
 #include "../src/ui/settings_screen.h"
 #include "../src/ui/styles.h"
 #include "../src/ui/wifi_setup_screen.h"
@@ -134,8 +135,10 @@ int main(int argc, char** argv) {
   if (args.intraday) fake_data::seed_intraday(store, args.symbol.c_str());
 
   styles::init();
+  logos::prepareRuntimeDecoder();
   settings_screen::init(&settings);
   list_screen::build(&store, &settings);
+  logos::releaseRuntimeDecoder();
 
   // Pick which screen to land on.
   if (args.screen == "list") {

@@ -2,6 +2,8 @@
 
 Stock ticker firmware for the ESP32-2432S028R "Cheap Yellow Display".
 
+Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-architecture.html).
+
 - **Stack**: PlatformIO + Arduino-ESP32, LovyanGFX, LVGL 9.x, ArduinoJson v7, ESPAsyncWebServer.
 - **Tasks**: LVGL UI pinned to core 1, networking (WiFi + HTTPS + web admin) on core 0. UI never blocks on the network.
 - **Display**: ST7789 240×320, landscape (320×240), display inversion ON. Touch via XPT2046 on a separate SPI bus. Targets the dual-USB (USB-C + micro-USB) ESP32-2432S028R revision; the original single-micro-USB rev ships with an ILI9341 — see `src/display/lgfx_cyd.hpp` if you're on that one.

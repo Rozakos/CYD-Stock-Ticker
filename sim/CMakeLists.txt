@@ -35,6 +35,8 @@ add_executable(cyd_sim
     ${PROJECT_ROOT}/src/ui/detail_screen.cpp
     ${PROJECT_ROOT}/src/ui/settings_screen.cpp
     ${PROJECT_ROOT}/src/ui/wifi_setup_screen.cpp
+    ${LIBDEPS}/LovyanGFX/src/lgfx/utility/lgfx_miniz.c
+    ${LIBDEPS}/LovyanGFX/src/lgfx/utility/lgfx_pngle.c
     wifi_mgr_stub.cpp
 )
 
@@ -52,6 +54,7 @@ target_include_directories(cyd_sim PRIVATE
     ${PROJECT_ROOT}/include
     ${PROJECT_ROOT}/src
     ${LIBDEPS}/ArduinoJson/src
+    ${LIBDEPS}/LovyanGFX/src
 )
 
 target_include_directories(cyd_sim PRIVATE ${SDL2_INCLUDE_DIRS})

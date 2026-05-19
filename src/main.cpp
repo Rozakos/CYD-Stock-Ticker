@@ -18,6 +18,7 @@
 #include "settings/settings_store.h"
 #include "ui/detail_screen.h"
 #include "ui/list_screen.h"
+#include "ui/logos.h"
 #include "ui/settings_screen.h"
 #include "ui/styles.h"
 #include "ui/wifi_setup_screen.h"
@@ -32,8 +33,10 @@ SemaphoreHandle_t g_lvglMu = nullptr;
 void uiTask(void*) {
   xSemaphoreTake(g_lvglMu, portMAX_DELAY);
   styles::init();
+  logos::prepareRuntimeDecoder();
   settings_screen::init(&g_settings);
   list_screen::build(&g_quoteStore, &g_settings);
+  logos::releaseRuntimeDecoder();
   // Initial screen is chosen by netTask once it knows STA vs AP state;
   // until then show a blank list screen.
   lv_screen_load(list_screen::screen());

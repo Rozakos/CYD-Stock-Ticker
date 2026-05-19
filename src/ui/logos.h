@@ -5,6 +5,14 @@
 
 namespace logos {
 
+// Allocates the reusable runtime PNG decoder before UI widgets fragment the
+// heap. Runtime logos can still fall back to a badge if this fails.
+bool prepareRuntimeDecoder();
+
+// Frees the reusable PNG decoder after cached runtime logos have been decoded.
+// The small ARGB logo cache remains available for future widget rebuilds.
+void releaseRuntimeDecoder();
+
 // Creates a square logo for `symbol` sized `size` x `size`.
 // Resolves /logos/<SYMBOL>.png on LittleFS; if missing, draws a circular
 // brand-colored badge with the first 1-2 letters of the symbol.

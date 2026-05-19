@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CYD Stock Ticker Firmware Architecture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101418;
+      --panel: #151c22;
+      --panel-2: #1b242b;
+      --ink: #edf3f7;
+      --muted: #9fb0bd;
+      --line: #2e3c46;
+      --cyan: #48c6d8;
+      --green: #6bd17a;
+      --amber: #f2b84b;
+      --red: #f07178;
+      --violet: #b79cff;
+      --blue: #70a7ff;
+      --shadow: rgba(0, 0, 0, 0.25);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(72, 198, 216, 0.16), transparent 32rem),
+        radial-gradient(circle at 90% 8%, rgba(107, 209, 122, 0.12), transparent 28rem),
+        var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 36px 0 52px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      gap: 24px;
+      align-items: stretch;
+      margin-bottom: 24px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      margin-bottom: 14px;
+      font-size: clamp(2.1rem, 5vw, 4.2rem);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: 1.35rem;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      font-size: 1rem;
+      letter-spacing: 0;
+    }
+
+    p { color: var(--muted); }
+
+    code {
+      color: #d9f6ff;
+      background: rgba(112, 167, 255, 0.13);
+      border: 1px solid rgba(112, 167, 255, 0.18);
+      border-radius: 6px;
+      padding: 0.06rem 0.35rem;
+      font-size: 0.92em;
+    }
+
+    .hero, .metric, .card, .flow, .note {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent), var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 45px var(--shadow);
+    }
+
+    .hero {
+      border-radius: 8px;
+      padding: 26px;
+      min-height: 260px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      width: max-content;
+      align-items: center;
+      gap: 8px;
+      color: var(--cyan);
+      font-weight: 700;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 16px var(--green);
+    }
+
+    .hero p {
+      max-width: 760px;
+      margin-bottom: 0;
+      font-size: 1.04rem;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 124px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 1.5rem;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    .card, .flow, .note {
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .span-5 { grid-column: span 5; }
+    .span-6 { grid-column: span 6; }
+    .span-7 { grid-column: span 7; }
+    .span-12 { grid-column: span 12; }
+
+    .architecture {
+      width: 100%;
+      min-height: 620px;
+      display: block;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .list li {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 10px;
+      padding: 9px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+    }
+
+    .list li:first-child { border-top: 0; }
+
+    .list li::before {
+      content: "";
+      margin-top: 7px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--cyan);
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .step {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 138px;
+    }
+
+    .step b {
+      color: var(--ink);
+      display: block;
+      margin-bottom: 7px;
+    }
+
+    .step p {
+      margin: 0;
+      font-size: 0.92rem;
+    }
+
+    .note {
+      border-color: rgba(242, 184, 75, 0.45);
+      background:
+        linear-gradient(180deg, rgba(242, 184, 75, 0.08), transparent),
+        var(--panel);
+    }
+
+    .note strong { color: var(--amber); }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .table th, .table td {
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .table th {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 900px) {
+      header, .pipeline { grid-template-columns: 1fr; }
+      .span-5, .span-6, .span-7 { grid-column: span 12; }
+      .metrics { grid-template-columns: 1fr 1fr; }
+      .architecture { min-height: 520px; }
+    }
+
+    @media (max-width: 620px) {
+      main { width: min(100vw - 20px, 1180px); padding-top: 18px; }
+      .hero, .metric, .card, .flow, .note { padding: 14px; }
+      .metrics { grid-template-columns: 1fr; }
+      .architecture { min-height: 480px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">ESP32-2432S028R firmware</div>
+          <h1>CYD Stock Ticker Architecture</h1>
+        </div>
+        <p>
+          A 320x240 LVGL stock dashboard for the Cheap Yellow Display. The UI
+          stays on core 1, networking stays on core 0, and the stock-api proxy
+          keeps HTTPS, yfinance, history, and logo resolution off the device.
+        </p>
+      </section>
+
+      <aside class="metrics" aria-label="Project facts">
+        <div class="metric">
+          <strong>2 tasks</strong>
+          <span>UI and network work are pinned to separate ESP32 cores.</span>
+        </div>
+        <div class="metric">
+          <strong>32 KB</strong>
+          <span>Device LVGL heap budget. The simulator overrides this upward.</span>
+        </div>
+        <div class="metric">
+          <strong>64x64</strong>
+          <span>Runtime logos arrive from the API as transparent PNG assets.</span>
+        </div>
+        <div class="metric">
+          <strong>192 KB</strong>
+          <span>LittleFS partition; keep baked <code>data/</code> content tiny.</span>
+        </div>
+      </aside>
+    </header>
+
+    <section class="flow span-12" aria-label="Architecture diagram">
+      <h2>System Map</h2>
+      <svg class="architecture" viewBox="0 0 1120 620" role="img" aria-labelledby="arch-title arch-desc">
+        <title id="arch-title">CYD Stock Ticker firmware architecture diagram</title>
+        <desc id="arch-desc">Diagram of hardware, UI task, network task, storage, and the stock API.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L0,6 L9,3 z" fill="#6f8795"></path>
+          </marker>
+          <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.26"></feDropShadow>
+          </filter>
+        </defs>
+
+        <rect x="20" y="20" width="1080" height="580" rx="18" fill="#111820" stroke="#2e3c46"></rect>
+        <text x="50" y="58" fill="#edf3f7" font-size="21" font-weight="700">Firmware runtime</text>
+        <text x="50" y="84" fill="#9fb0bd" font-size="14">Two FreeRTOS tasks share stores under mutexes; LVGL is single-threaded behind g_lvglMu.</text>
+
+        <g filter="url(#soft-shadow)">
+          <rect x="58" y="128" width="228" height="145" rx="10" fill="#17242d" stroke="#48c6d8"></rect>
+          <text x="82" y="160" fill="#48c6d8" font-size="16" font-weight="700">Display + Touch</text>
+          <text x="82" y="188" fill="#edf3f7" font-size="14">ST7789 landscape 320x240</text>
+          <text x="82" y="212" fill="#9fb0bd" font-size="13">LovyanGFX flushes RGB565</text>
+          <text x="82" y="236" fill="#9fb0bd" font-size="13">XPT2046 touch on separate SPI</text>
+
+          <rect x="58" y="328" width="228" height="142" rx="10" fill="#17201b" stroke="#6bd17a"></rect>
+          <text x="82" y="360" fill="#6bd17a" font-size="16" font-weight="700">LittleFS</text>
+          <text x="82" y="388" fill="#edf3f7" font-size="14">/settings.json</text>
+          <text x="82" y="412" fill="#9fb0bd" font-size="13">/logos/&lt;SYMBOL&gt;.png</text>
+          <text x="82" y="436" fill="#9fb0bd" font-size="13">LVGL FS driver mounted as L:</text>
+        </g>
+
+        <g filter="url(#soft-shadow)">
+          <rect x="358" y="112" width="274" height="178" rx="10" fill="#1a222b" stroke="#70a7ff"></rect>
+          <text x="382" y="145" fill="#70a7ff" font-size="16" font-weight="700">uiTask - core 1</text>
+          <text x="382" y="174" fill="#edf3f7" font-size="14">LVGL tick, input, screen rebuilds</text>
+          <text x="382" y="199" fill="#9fb0bd" font-size="13">list_screen, detail_screen</text>
+          <text x="382" y="222" fill="#9fb0bd" font-size="13">settings info, captive QR</text>
+          <text x="382" y="245" fill="#9fb0bd" font-size="13">runtime logo decode/cache lifecycle</text>
+
+          <rect x="358" y="354" width="274" height="142" rx="10" fill="#221c2d" stroke="#b79cff"></rect>
+          <text x="382" y="386" fill="#b79cff" font-size="16" font-weight="700">Shared Stores</text>
+          <text x="382" y="414" fill="#edf3f7" font-size="14">QuoteStore + SettingsStore</text>
+          <text x="382" y="438" fill="#9fb0bd" font-size="13">mutex-protected snapshots</text>
+          <text x="382" y="462" fill="#9fb0bd" font-size="13">pending history requests + ranges</text>
+        </g>
+
+        <g filter="url(#soft-shadow)">
+          <rect x="706" y="112" width="292" height="178" rx="10" fill="#2a2114" stroke="#f2b84b"></rect>
+          <text x="730" y="145" fill="#f2b84b" font-size="16" font-weight="700">netTask - core 0</text>
+          <text x="730" y="174" fill="#edf3f7" font-size="14">WiFi, HTTPS, API polling</text>
+          <text x="730" y="199" fill="#9fb0bd" font-size="13">GET /stock/{symbol}</text>
+          <text x="730" y="222" fill="#9fb0bd" font-size="13">GET /history/{symbol}?range=...</text>
+          <text x="730" y="245" fill="#9fb0bd" font-size="13">GET /logo/{symbol}</text>
+
+          <rect x="706" y="354" width="292" height="142" rx="10" fill="#2a1d20" stroke="#f07178"></rect>
+          <text x="730" y="386" fill="#f07178" font-size="16" font-weight="700">Web Admin + Portal</text>
+          <text x="730" y="414" fill="#edf3f7" font-size="14">ESPAsyncWebServer</text>
+          <text x="730" y="438" fill="#9fb0bd" font-size="13">/settings for token, symbols, interval</text>
+          <text x="730" y="462" fill="#9fb0bd" font-size="13">CYD-Setup fallback AP onboarding</text>
+        </g>
+
+        <g filter="url(#soft-shadow)">
+          <rect x="372" y="540" width="612" height="46" rx="10" fill="#151c22" stroke="#2e3c46"></rect>
+          <text x="396" y="569" fill="#edf3f7" font-size="14" font-weight="700">stock-api</text>
+          <text x="480" y="569" fill="#9fb0bd" font-size="13">FastAPI + yfinance proxy, bearer auth, history ranges, normalized logo PNGs</text>
+        </g>
+
+        <path d="M286 199 C322 199, 322 199, 358 199" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M358 230 C310 260, 300 330, 286 386" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M632 200 C660 200, 678 200, 706 200" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M706 425 C676 425, 662 425, 632 425" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M494 354 C494 322, 494 322, 494 290" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M852 290 C852 318, 852 326, 852 354" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M852 496 C852 522, 835 540, 805 540" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+        <path d="M706 232 C616 292, 586 444, 598 540" stroke="#6f8795" stroke-width="2" fill="none" marker-end="url(#arrow)"></path>
+      </svg>
+      <div class="legend">
+        <span><i class="dot" style="background: var(--blue)"></i> UI rendering</span>
+        <span><i class="dot" style="background: var(--amber)"></i> Network/API</span>
+        <span><i class="dot" style="background: var(--green)"></i> Persistent state</span>
+        <span><i class="dot" style="background: var(--violet)"></i> Shared data</span>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card span-6">
+        <h2>Task Boundaries</h2>
+        <ul class="list">
+          <li><strong>UI task:</strong> owns LVGL calls, screen transitions, chart rendering, touch processing, and the runtime decoded-logo cache.</li>
+          <li><strong>Network task:</strong> owns STA/AP WiFi, HTTPS stock requests, runtime logo downloads, the captive portal, and the `/settings` web admin.</li>
+          <li><strong>Stores:</strong> `QuoteStore` and `SettingsStore` provide mutex-protected handoff points so neither task reaches across the boundary directly.</li>
+          <li><strong>LVGL invariant:</strong> `LV_OS_NONE` is deliberate. All LVGL access stays behind the project lock instead of LVGL's FreeRTOS OSAL.</li>
+        </ul>
+      </section>
+
+      <section class="card span-6">
+        <h2>Display Invariants</h2>
+        <table class="table">
+          <tr><th>Area</th><th>Rule</th></tr>
+          <tr><td>RGB565 byte order</td><td><code>LV_COLOR_16_SWAP=0</code>, then LovyanGFX <code>writePixels(..., true)</code> byte-swaps for SPI.</td></tr>
+          <tr><td>Panel inversion</td><td>ST7789 <code>cfg.invert = false</code> for the dual-USB CYD board.</td></tr>
+          <tr><td>Touch</td><td>XPT2046 pins live in the touch config; this LovyanGFX version has no <code>setBus()</code> for touch.</td></tr>
+          <tr><td>Memory levers</td><td>First reduce LVGL flush <code>LINES</code>, then <code>LV_MEM_SIZE</code>, before adding heavier UI assets.</td></tr>
+        </table>
+      </section>
+
+      <section class="card span-12">
+        <h2>Data Flow</h2>
+        <div class="pipeline">
+          <div class="step">
+            <b>1. Settings</b>
+            <p>On boot, LittleFS settings seed WiFi credentials, API token, symbols, refresh interval, and favourites.</p>
+          </div>
+          <div class="step">
+            <b>2. Quotes</b>
+            <p>The network task fetches <code>/stock/{symbol}</code> with bearer auth and a non-empty User-Agent, then stores last price, change, and sparkline closes.</p>
+          </div>
+          <div class="step">
+            <b>3. History</b>
+            <p>Detail range taps request <code>/history/{symbol}?range=1d|5d|1w|1mo|6mo</code>; generation checks drop stale responses.</p>
+          </div>
+          <div class="step">
+            <b>4. Render</b>
+            <p>The UI task snapshots the stores, draws list/detail screens, formats history, and uses cached logos or fallback badges.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card span-7">
+        <h2>Logo Pipeline</h2>
+        <ul class="list">
+          <li>Embedded logos come from <code>sim/logo_src/*.png</code> through <code>sim/build_logo_arrays.py</code> into <code>src/ui/logos_data.cpp</code>.</li>
+          <li>Missing logos are downloaded from <code>stock-api</code> as <code>/logos/&lt;SYMBOL&gt;.png</code> in LittleFS.</li>
+          <li>Runtime logos are decoded with LovyanGFX PNGLE, alpha-trimmed, resampled into transparent ARGB image buffers, and mounted through LVGL.</li>
+          <li>The PNG decoder is prepared for initial list construction and released afterward so TLS has enough contiguous DRAM for future HTTPS calls.</li>
+        </ul>
+      </section>
+
+      <aside class="note span-5">
+        <h2>Storage Rule</h2>
+        <p>
+          <strong>Keep <code>data/</code> near-empty.</strong> The LittleFS partition is small,
+          and baked filesystem content competes with runtime-fetched logos and
+          settings. Source PNGs for embedded logos belong in <code>sim/logo_src/</code>, not
+          <code>data/logos/</code>.
+        </p>
+      </aside>
+
+      <section class="card span-6">
+        <h2>UI Surfaces</h2>
+        <ul class="list">
+          <li><strong>List:</strong> rows show logo or badge, symbol, price, percent change, and sparkline.</li>
+          <li><strong>Detail:</strong> selected symbol, current price, range gain/loss, and an area-filled chart with range tabs.</li>
+          <li><strong>Settings screen:</strong> read-only device status with LAN URL for the web admin.</li>
+          <li><strong>Web admin:</strong> LAN form for token, refresh interval, and symbol add/delete.</li>
+        </ul>
+      </section>
+
+      <section class="card span-6">
+        <h2>Simulator</h2>
+        <ul class="list">
+          <li>Build with <code>sim/build_sim.ps1</code>; it drives the MSYS2/MinGW toolchain directly.</li>
+          <li><code>--window</code> opens an SDL preview; <code>--headless --out=file.png</code> renders screenshots for review.</li>
+          <li><code>--web-settings=file.html</code> emits the same browser settings UI used by firmware.</li>
+          <li>The simulator links the same UI sources and uses a larger LVGL heap to keep desktop testing ergonomic.</li>
+        </ul>
+      </section>
+    </div>
+
+    <footer>
+      Source map generated from the firmware handoff notes and current source layout.
+      Keep this page aligned with AGENTS.md when task boundaries, API contracts,
+      display invariants, or logo handling change.
+    </footer>
+  </main>
+</body>
+</html>

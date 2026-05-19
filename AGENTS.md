@@ -121,12 +121,14 @@ src/
   ARGB8888 `lv_image_dsc_t` via `logos_data::find(symbol)`
   (`src/ui/logos_data.{cpp,h}`, generated from `sim/logo_src/*.png` by
   `sim/build_logo_arrays.py`). If the symbol isn't bundled, it falls
-  back to a runtime LittleFS PNG read (`L:/logos/<SYMBOL>.png`), then to
-  a circular brand-colored letter badge. The embedded path works
-  identically on the device and in the sim because it skips the LVGL FS
-  + lodepng pipeline that the sim's software flush doesn't render
-  visually. To add or refresh logos: drop PNGs into `sim/logo_src/` and
-  run `python sim/build_logo_arrays.py` from the project root.
+  back to a cached runtime LittleFS PNG (`/logos/<SYMBOL>.png`), decodes
+  it with LovyanGFX `pngle` into a malloc'd ARGB8888 `lv_image_dsc_t`,
+  and mounts that in memory; if decode/cache is missing it draws the
+  circular brand-coloured letter badge. Both embedded and runtime paths
+  now skip LVGL's file-backed PNG renderer, which reported good dimensions
+  but dropped pixels on the CYD. To add or refresh embedded logos: drop
+  PNGs into `sim/logo_src/` and run `python sim/build_logo_arrays.py` from
+  the project root.
   - **`data/` MUST stay near-empty.** The min_spiffs partition is only
     192 KB. Anything in `data/` gets baked into the LittleFS image at
     `uploadfs` time, leaving little room for runtime-fetched logos. The
@@ -223,6 +225,29 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Runtime logos render via in-memory ARGB8888, not LVGL file PNG**
+  (2026-05-19, Codex): replaced `lv_image_set_src(img, "L:/logos/...")`
+  with a runtime decode path in `src/ui/logos.cpp`. Cached PNG bytes are
+  read under the LittleFS guard, decoded with LovyanGFX `pngle`, converted
+  from pngle's A,R,G,B callback bytes to LVGL's little-endian B,G,R,A
+  `LV_COLOR_FORMAT_ARGB8888`, transparent-padding trimmed, alpha-resampled
+  into the displayed slot, then attached directly as an `lv_image` with a
+  delete callback that frees the pixel buffer/descriptor. There is no grey
+  debug backing on successful runtime logos anymore; they visually match
+  embedded transparent logos. This intentionally uses the same render path
+  as embedded `logos_data` and bypasses the broken LVGL FS + lodepng draw
+  path. The LovyanGFX `pngle_t` decoder is ~44 KB contiguous DRAM, so it is
+  allocated early via `logos::prepareRuntimeDecoder()`, used to populate a
+  small cached ARGB runtime-logo table, then released with
+  `logos::releaseRuntimeDecoder()` before HTTPS fetches need heap. Do not
+  keep the decoder resident; it starves TLS handshakes.
+
+  `cfg::LOGO_TEST_MODE` is back to `false`, so firmware now requests real
+  `/logo/<SYMBOL>` images. The sim links LovyanGFX `lgfx_pngle.c` and
+  `lgfx_miniz.c`; verified with a host-side `sim/build/sim_data/logos/IONQ.png`
+  and `cyd_sim.exe --headless --screen=detail --symbol=IONQ --out=runtime_ionq.png`.
+  Firmware build after the change: RAM 36.1%, Flash 96.6%.
 
 - **LOGO_TEST_MODE verdict: LVGL file-PNG render path is broken**
   (2026-05-19): The user ran the `?test=1` synthetic 64×64 RGBA PNG (red
