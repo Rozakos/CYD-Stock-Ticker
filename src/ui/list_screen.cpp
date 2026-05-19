@@ -59,6 +59,10 @@ struct Row {
   // stroke and the area-fill draw event read this field, so they can't
   // drift apart through style-cascade quirks.
   lv_color_t accent      = lv_color_hex(0x8a98ad);
+  // logos::signature() result for the logo currently mounted on this row.
+  // rebuild_logo only fires when it changes, so embedded/badge rows skip
+  // the widget churn every refresh tick.
+  uint32_t   logo_sig    = 0;
   String     symbol;
 };
 std::vector<Row> g_rows;
@@ -141,7 +145,8 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(r.obj, LV_OBJ_FLAG_CLICKABLE);
 
-  r.logo = logos::make(r.obj, symbol, LOGO_SIZE);
+  r.logo     = logos::make(r.obj, symbol, LOGO_SIZE);
+  r.logo_sig = logos::signature(symbol);
   lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   lv_obj_t* sym_col = lv_obj_create(r.obj);
@@ -204,8 +209,15 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
 }
 
 void rebuild_logo(Row& r) {
+  // No-op when the logo source hasn't changed since the last build —
+  // embedded logos always return the same signature and the badge
+  // fallback never changes either. Only newly-cached runtime PNGs or
+  // a swap between source kinds force the widget recreation.
+  uint32_t want = logos::signature(r.symbol);
+  if (r.logo && want == r.logo_sig) return;
   if (r.logo) lv_obj_delete(r.logo);
-  r.logo = logos::make(r.obj, r.symbol, LOGO_SIZE);
+  r.logo     = logos::make(r.obj, r.symbol, LOGO_SIZE);
+  r.logo_sig = want;
   lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_move_to_index(r.logo, 0);
 }

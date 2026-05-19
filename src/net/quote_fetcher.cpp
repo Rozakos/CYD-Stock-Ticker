@@ -17,11 +17,6 @@
 
 namespace {
 
-// Temporary diagnostic: ask stock-api for a synthetic red/green/blue PNG
-// for any non-embedded logo. If this renders, runtime PNG drawing works and
-// real logos need API-side contrast normalization.
-static constexpr bool kLogoApiTestMode = true;
-
 String logoPath(const String& symbol) {
   String s = symbol;
   s.toUpperCase();
@@ -75,10 +70,20 @@ bool logoExists(const String& path) {
 }
 
 bool fetchLogo(const String& symbol, const String& token) {
+  // Embedded ARGB8888 logos in `logos_data` bypass the runtime PNG path
+  // entirely; nothing to do at the fetch layer.
   if (logos_data::find(symbol.c_str())) return true;
 
   String path = logoPath(symbol);
-  if (!kLogoApiTestMode && logoExists(path)) return true;
+  // Cache check: skip the HTTP round-trip when we already have the file.
+  // In LOGO_TEST_MODE we always re-fetch and overwrite — the server sends
+  // Cache-Control: no-store and we don't want a stale cached file
+  // masking the rendering pipeline behaviour we're diagnosing.
+  if (!cfg::LOGO_TEST_MODE && logoExists(path)) return true;
+
+  String url = String(cfg::API_BASE) + "/logo/" + symbol;
+  if (cfg::LOGO_TEST_MODE) url += "?test=1";
+  log_i("[logo] %s GET %s", symbol.c_str(), url.c_str());
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -86,87 +91,98 @@ bool fetchLogo(const String& symbol, const String& token) {
   http.setTimeout(10000);
   http.setReuse(false);
 
-  String url = String(cfg::API_BASE) + "/logo/" + symbol;
-  if (kLogoApiTestMode) url += "?test=1";
-  if (!http.begin(client, url)) return false;
+  if (!http.begin(client, url)) {
+    log_w("[logo] %s http.begin failed", symbol.c_str());
+    return false;
+  }
   http.useHTTP10(true);
   http.addHeader("Accept-Encoding", "identity");
   http.addHeader("User-Agent", cfg::API_USER_AGENT);
   if (token.length()) http.addHeader("Authorization", String("Bearer ") + token);
 
   int code = http.GET();
+  log_i("[logo] %s HTTP %d", symbol.c_str(), code);
   if (code != 200) {
-    log_w("[%s] logo HTTP %d", symbol.c_str(), code);
     http.end();
     return false;
   }
 
-  String tmp = path + ".tmp";
+  // Buffer the HTTP body in RAM rather than streaming directly to LittleFS.
+  // The previous version held fs_littlefs::Guard across the entire HTTP
+  // receive loop (up to 10 s on a slow connection), which blocked the UI
+  // task whenever it tried to read another logo from LittleFS — touch
+  // appeared frozen for the duration of every per-symbol logo fetch. With
+  // the body in RAM the guard is only held for the quick write + rename,
+  // never during the network read.
+  std::vector<uint8_t> body;
+  body.reserve(8192);
+  static constexpr size_t kLogoMaxBytes = 65536;
+
   WiFiClient* stream = http.getStreamPtr();
   uint8_t buf[512];
-  size_t total = 0;
   bool ok = true;
+  uint32_t lastData = millis();
+  while (http.connected() && millis() - lastData < 10000) {
+    int avail = stream->available();
+    if (!avail) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+    size_t want = avail < (int)sizeof(buf) ? (size_t)avail : sizeof(buf);
+    int got = stream->readBytes(buf, want);
+    if (got <= 0) break;
+    lastData = millis();
+    if (body.size() + (size_t)got > kLogoMaxBytes) {
+      log_w("[logo] %s too large (>%u bytes)",
+            symbol.c_str(), (unsigned)kLogoMaxBytes);
+      ok = false;
+      break;
+    }
+    body.insert(body.end(), buf, buf + got);
+  }
+  http.end();
+  log_i("[logo] %s bytes=%u", symbol.c_str(), (unsigned)body.size());
 
+  if (!ok || body.size() < 8) {
+    log_w("[logo] %s body invalid", symbol.c_str());
+    return false;
+  }
+  // PNG signature check before we touch the filesystem.
+  const uint8_t* s = body.data();
+  if (!(s[0] == 0x89 && s[1] == 'P' && s[2] == 'N' && s[3] == 'G' &&
+        s[4] == '\r' && s[5] == '\n' && s[6] == 0x1a && s[7] == '\n')) {
+    log_w("[logo] %s not a PNG (sig=%02X %02X %02X %02X)",
+          symbol.c_str(), s[0], s[1], s[2], s[3]);
+    return false;
+  }
+
+  String tmp = path + ".tmp";
   {
+    // Held only across the (fast) write + rename — never the HTTP recv.
     fs_littlefs::Guard g;
     LittleFS.mkdir("/logos");
-    if (kLogoApiTestMode) LittleFS.remove(path);
     LittleFS.remove(tmp);
     File f = LittleFS.open(tmp, "w");
     if (!f) {
-      log_w("[%s] logo cache open failed", symbol.c_str());
-      http.end();
+      log_w("[logo] %s cache open failed", symbol.c_str());
       return false;
     }
-
-    uint32_t lastData = millis();
-    while (http.connected() && millis() - lastData < 10000) {
-      int avail = stream->available();
-      if (!avail) {
-        delay(1);
-        continue;
-      }
-      size_t want = avail < (int)sizeof(buf) ? (size_t)avail : sizeof(buf);
-      int got = stream->readBytes(buf, want);
-      if (got <= 0) break;
-      lastData = millis();
-
-      if (f.write(buf, got) != (size_t)got) {
-        ok = false;
-        break;
-      }
-      total += (size_t)got;
-      if (total > 65536) {
-        log_w("[%s] logo too large", symbol.c_str());
-        ok = false;
-        break;
-      }
-    }
-
+    size_t wrote = f.write(body.data(), body.size());
     f.close();
-    if (ok && total > 8) {
-      uint8_t sig[8] = {};
-      File r = LittleFS.open(tmp, "r");
-      ok = r && r.read(sig, sizeof(sig)) == sizeof(sig) &&
-           sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' &&
-           sig[3] == 'G' && sig[4] == '\r' && sig[5] == '\n' &&
-           sig[6] == 0x1a && sig[7] == '\n';
-      if (r) r.close();
-    } else {
-      ok = false;
-    }
-
-    if (ok) {
-      LittleFS.remove(path);
-      ok = LittleFS.rename(tmp, path);
-    } else {
+    if (wrote != body.size()) {
+      log_w("[logo] %s write short: %u/%u", symbol.c_str(),
+            (unsigned)wrote, (unsigned)body.size());
       LittleFS.remove(tmp);
+      return false;
     }
+    LittleFS.remove(path);   // unconditional overwrite — no stale cache
+    ok = LittleFS.rename(tmp, path);
+    if (!ok) LittleFS.remove(tmp);
   }
 
-  http.end();
-  if (ok) log_i("[%s] logo cached: %u bytes", symbol.c_str(), (unsigned)total);
-  else    log_w("[%s] logo cache failed", symbol.c_str());
+  if (ok) log_i("[logo] %s cached %s (%u bytes)",
+                symbol.c_str(), path.c_str(), (unsigned)body.size());
+  else    log_w("[logo] %s rename failed", symbol.c_str());
   return ok;
 }
 

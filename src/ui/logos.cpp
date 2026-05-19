@@ -120,4 +120,29 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
   return makeBadge(parent, symbol, size);
 }
 
+// Stable signature for "what would make() return right now". Caller uses
+// this to detect when the logo source for a symbol has changed (badge ↔
+// runtime PNG ↔ embedded ARGB) so a stale logo widget can be rebuilt
+// without churning every render tick. High byte = kind, low 24 bits =
+// payload (file size for runtime PNG, 0 otherwise).
+uint32_t signature(const String& symbol) {
+  String up = symbol;
+  up.toUpperCase();
+  if (logos_data::find(up.c_str())) return 0x01000000u;  // embedded
+
+  String path = logoPath(symbol);
+  size_t bytes = 0;
+  bool   exists = false;
+  {
+    fs_littlefs::Guard g;
+    if (LittleFS.exists(path)) {
+      exists = true;
+      File f = LittleFS.open(path, "r");
+      if (f) { bytes = f.size(); f.close(); }
+    }
+  }
+  if (exists) return 0x02000000u | (uint32_t)(bytes & 0x00FFFFFFu);
+  return 0x03000000u;  // badge fallback
+}
+
 }  // namespace logos

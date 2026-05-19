@@ -26,4 +26,14 @@ inline constexpr uint16_t SCREEN_H = 240;
 inline constexpr uint16_t HISTORY_POINTS  = 30;
 inline constexpr uint16_t SPARKLINE_POINTS = 10;
 
+// Diagnostic switch for the runtime-logo pipeline. When true, the fetcher
+// appends ?test=1 to /logo/<SYMBOL> — the API returns a synthetic 64×64
+// RGBA PNG (red bg, green diagonal stripe, blue centre dot, Cache-Control:
+// no-store). LittleFS cache is bypassed on the fetch side so we never
+// reuse a stale file. Decoding / mounting in `ui/logos.cpp` is left
+// unchanged so the screen output isolates the LVGL file-PNG render path
+// from any per-symbol logo content issue. Flip back to false once
+// diagnosis is done.
+inline constexpr bool LOGO_TEST_MODE = true;
+
 }  // namespace cfg
