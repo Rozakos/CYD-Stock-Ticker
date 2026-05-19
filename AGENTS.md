@@ -134,6 +134,10 @@ src/
     `uploadfs` time, leaving little room for runtime-fetched logos. The
     source PNGs that drive `build_logo_arrays.py` deliberately live in
     `sim/logo_src/` (NOT `data/logos/`) for this reason.
+  - **Embedded logo set is intentionally tiny.** Keep only AMD, MSFT, and
+    NVDA embedded unless there is a strong reason to add another symbol.
+    Runtime logos come from the API. The full 30-logo embedded table pushed
+    firmware flash to ~97%; the tiny set keeps flash around ~83%.
 - **Settings screen**: read-only. Editing happens in the web admin (no
   on-device keyboard). The screen pulls live WiFi info each tick and
   exposes the `http://<ip>/` URL so the user knows where to go.

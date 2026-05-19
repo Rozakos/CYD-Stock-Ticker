@@ -13,6 +13,10 @@ bool prepareRuntimeDecoder();
 // The small ARGB logo cache remains available for future widget rebuilds.
 void releaseRuntimeDecoder();
 
+// Frees decoded runtime logos after their owning LVGL widgets have been
+// deleted. Call immediately after cleaning a screen/list that used them.
+void clearRuntimeCache();
+
 // Creates a square logo for `symbol` sized `size` x `size`.
 // Resolves /logos/<SYMBOL>.png on LittleFS; if missing, draws a circular
 // brand-colored badge with the first 1-2 letters of the symbol.

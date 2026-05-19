@@ -293,6 +293,7 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
   if (!same) {
     lv_obj_clean(g_list);
     g_rows.clear();
+    logos::clearRuntimeCache();
     g_rows.reserve(quotes.size());
     for (const auto& q : quotes) g_rows.push_back(make_row(g_list, q.symbol));
     // Bake the row index into each sparkline's user_data now that the
@@ -479,6 +480,7 @@ void tick() {
     // (the symbol set is the same — just the partition order changed).
     lv_obj_clean(g_list);
     g_rows.clear();
+    logos::clearRuntimeCache();
     g_favourites_dirty = false;
   }
   if (lu != lastSeen || g_rows.size() != quotes.size()) {

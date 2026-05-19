@@ -59,6 +59,7 @@ struct PngDecodeCtx {
   uint32_t outH;
   uint32_t offX;
   uint32_t offY;
+  uint16_t* accum;
 };
 
 String logoPath(const String& symbol) {
@@ -153,23 +154,36 @@ void pngDrawCb(void* userData, uint32_t x, uint32_t y,
     uint32_t cropH = ctx->bounds.y1 - ctx->bounds.y0;
     uint32_t relX = px - ctx->bounds.x0;
     uint32_t relY = y - ctx->bounds.y0;
-    uint32_t dx0 = ctx->offX + (relX * ctx->outW) / cropW;
-    uint32_t dx1 = ctx->offX + ((relX + 1) * ctx->outW + cropW - 1) / cropW;
-    uint32_t dy0 = ctx->offY + (relY * ctx->outH) / cropH;
-    uint32_t dy1 = ctx->offY + ((relY + 1) * ctx->outH + cropH - 1) / cropH;
-    if (dx1 <= dx0) dx1 = dx0 + 1;
-    if (dy1 <= dy0) dy1 = dy0 + 1;
-    if (dx1 > ctx->dstSide) dx1 = ctx->dstSide;
-    if (dy1 > ctx->dstSide) dy1 = ctx->dstSide;
+    if (ctx->accum) {
+      uint32_t dx = ctx->offX + (relX * ctx->outW) / cropW;
+      uint32_t dy = ctx->offY + (relY * ctx->outH) / cropH;
+      if (dx >= ctx->dstSide) dx = ctx->dstSide - 1;
+      if (dy >= ctx->dstSide) dy = ctx->dstSide - 1;
+      uint16_t* acc = ctx->accum + ((size_t)dy * ctx->dstSide + dx) * 5;
+      acc[0] += in[3];
+      acc[1] += in[2];
+      acc[2] += in[1];
+      acc[3] += in[0];
+      acc[4] += 1;
+    } else {
+      uint32_t dx0 = ctx->offX + (relX * ctx->outW) / cropW;
+      uint32_t dx1 = ctx->offX + ((relX + 1) * ctx->outW + cropW - 1) / cropW;
+      uint32_t dy0 = ctx->offY + (relY * ctx->outH) / cropH;
+      uint32_t dy1 = ctx->offY + ((relY + 1) * ctx->outH + cropH - 1) / cropH;
+      if (dx1 <= dx0) dx1 = dx0 + 1;
+      if (dy1 <= dy0) dy1 = dy0 + 1;
+      if (dx1 > ctx->dstSide) dx1 = ctx->dstSide;
+      if (dy1 > ctx->dstSide) dy1 = ctx->dstSide;
 
-    for (uint32_t yy = dy0; yy < dy1; ++yy) {
-      for (uint32_t xx = dx0; xx < dx1; ++xx) {
-        uint8_t* out = ctx->dst + ((size_t)yy * ctx->dstSide + xx) * 4;
-        // pngle emits A,R,G,B. LVGL ARGB8888 wants little-endian B,G,R,A.
-        out[0] = in[3];
-        out[1] = in[2];
-        out[2] = in[1];
-        out[3] = in[0];
+      for (uint32_t yy = dy0; yy < dy1; ++yy) {
+        for (uint32_t xx = dx0; xx < dx1; ++xx) {
+          uint8_t* out = ctx->dst + ((size_t)yy * ctx->dstSide + xx) * 4;
+          // pngle emits A,R,G,B. LVGL ARGB8888 wants little-endian B,G,R,A.
+          out[0] = in[3];
+          out[1] = in[2];
+          out[2] = in[1];
+          out[3] = in[0];
+        }
       }
     }
   }
@@ -294,6 +308,22 @@ bool configureRenderBounds(PngDecodeCtx& ctx, uint32_t dstSide) {
   return true;
 }
 
+void resolveAccumulatedLogo(PngDecodeCtx& ctx) {
+  if (!ctx.accum || !ctx.dst || !ctx.dstSide) return;
+  for (uint32_t y = 0; y < ctx.dstSide; ++y) {
+    for (uint32_t x = 0; x < ctx.dstSide; ++x) {
+      uint16_t* acc = ctx.accum + ((size_t)y * ctx.dstSide + x) * 5;
+      uint16_t n = acc[4];
+      if (!n) continue;
+      uint8_t* out = ctx.dst + ((size_t)y * ctx.dstSide + x) * 4;
+      out[0] = (uint8_t)((acc[0] + n / 2) / n);
+      out[1] = (uint8_t)((acc[1] + n / 2) / n);
+      out[2] = (uint8_t)((acc[2] + n / 2) / n);
+      out[3] = (uint8_t)((acc[3] + n / 2) / n);
+    }
+  }
+}
+
 RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
                                lv_coord_t targetSide, size_t* fileBytes) {
   uint8_t* png = nullptr;
@@ -333,7 +363,7 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
   pngle_t* pngle = g_pngle;
 
   PngDecodeCtx ctx{png, bytes, 0, PngDecodePass::Bounds, 0, 0,
-                   PixelBounds{0, 0, 0, 0}, nullptr, 0, 0, 0, 0, 0};
+                   PixelBounds{0, 0, 0, 0}, nullptr, 0, 0, 0, 0, 0, nullptr};
   if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0) {
     log_w("[logo] %s runtime prepare failed", symbol.c_str());
     std::free(png);
@@ -393,13 +423,26 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
   ctx.pos = 0;
   ctx.pass = PngDecodePass::Render;
   ctx.dst = logo->pixels;
+  uint32_t cropW = ctx.bounds.x1 - ctx.bounds.x0;
+  uint32_t cropH = ctx.bounds.y1 - ctx.bounds.y0;
+  if (cropW >= ctx.outW && cropH >= ctx.outH) {
+    size_t accumBytes = (size_t)outSide * outSide * 5 * sizeof(uint16_t);
+    ctx.accum = static_cast<uint16_t*>(std::calloc(1, accumBytes));
+    if (!ctx.accum) {
+      log_w("[logo] %s runtime smooth buffer alloc failed bytes=%u",
+            symbol.c_str(), (unsigned)accumBytes);
+    }
+  }
   if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0 ||
       lgfx_pngle_decomp(pngle, pngDrawCb) < 0) {
     log_w("[logo] %s runtime render pass failed", symbol.c_str());
+    std::free(ctx.accum);
     destroyRuntimeLogo(logo);
     std::free(png);
     return nullptr;
   }
+  resolveAccumulatedLogo(ctx);
+  std::free(ctx.accum);
   std::free(png);
 
   logo->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -462,6 +505,15 @@ void releaseRuntimeDecoder() {
   lgfx_pngle_destroy(g_pngle);
   g_pngle = nullptr;
   log_i("[logo] runtime decoder released");
+}
+
+void clearRuntimeCache() {
+  if (g_runtime_cache.empty()) return;
+  for (auto& cached : g_runtime_cache) {
+    destroyRuntimeLogo(cached.logo);
+  }
+  g_runtime_cache.clear();
+  log_i("[logo] runtime cache cleared");
 }
 
 lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
