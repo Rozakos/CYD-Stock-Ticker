@@ -203,6 +203,13 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   return r;
 }
 
+void rebuild_logo(Row& r) {
+  if (r.logo) lv_obj_delete(r.logo);
+  r.logo = logos::make(r.obj, r.symbol, LOGO_SIZE);
+  lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_move_to_index(r.logo, 0);
+}
+
 void update_spark(Row& r, const std::vector<float>& closes, bool up) {
   if (closes.size() < 2) {
     r.spark_n = 0;
@@ -282,6 +289,11 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
     for (size_t i = 0; i < g_rows.size(); ++i) {
       lv_obj_set_user_data(g_rows[i].spark, (void*)(uintptr_t)i);
     }
+  } else {
+    // A quote refresh can download a missing runtime logo into LittleFS
+    // without changing the symbol list. Rebuild just the logo widget so a
+    // row that started as a badge can switch to /logos/<SYMBOL>.png.
+    for (auto& r : g_rows) rebuild_logo(r);
   }
   for (size_t i = 0; i < quotes.size(); ++i) {
     const auto& q = quotes[i];

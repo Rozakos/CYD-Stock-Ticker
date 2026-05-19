@@ -16,6 +16,7 @@ DNSServer*       g_dns      = nullptr;
 AsyncWebServer*  g_server   = nullptr;
 SettingsStore*   g_settings = nullptr;
 bool             g_pendingReconnect = false;
+String           g_scan_options;
 
 String htmlEscape(const String& in) {
   String out;
@@ -34,11 +35,30 @@ String htmlEscape(const String& in) {
   return out;
 }
 
-String scanPage() {
-  // Scan synchronously so the dropdown is populated when the page renders.
-  // ~3s on most boards; we're in AP mode so nothing else is using the radio.
+void refreshScanOptions() {
+  log_i("[portal] scanning nearby WiFi networks");
   int n = WiFi.scanNetworks(false, true);
 
+  String opts;
+  opts.reserve(1024);
+  if (n <= 0) {
+    opts += F("<option value=''>(no networks found - type SSID below)</option>");
+  } else {
+    for (int i = 0; i < n; ++i) {
+      String ssid = WiFi.SSID(i);
+      if (!ssid.length()) continue;
+      String esc = htmlEscape(ssid);
+      opts += "<option value='" + esc + "'>" + esc +
+              "  (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    }
+  }
+  WiFi.scanDelete();
+  g_scan_options = opts;
+  log_i("[portal] scan complete: raw=%d options_bytes=%u",
+        n, (unsigned)g_scan_options.length());
+}
+
+String scanPage() {
   String html;
   html.reserve(2048);
   html += F("<!doctype html><meta charset=utf-8>"
@@ -56,17 +76,8 @@ String scanPage() {
             "<form method=POST action=/save>"
             "<label>Network</label>"
             "<select name=ssid id=ssid>");
-  if (n <= 0) {
-    html += F("<option value=''>(no networks found — refresh)</option>");
-  } else {
-    for (int i = 0; i < n; ++i) {
-      String ssid = WiFi.SSID(i);
-      if (!ssid.length()) continue;
-      String esc = htmlEscape(ssid);
-      html += "<option value='" + esc + "'>" + esc +
-              "  (" + String(WiFi.RSSI(i)) + " dBm)</option>";
-    }
-  }
+  if (g_scan_options.length()) html += g_scan_options;
+  else                         html += F("<option value=''>(type SSID below)</option>");
   html += F("</select>"
             "<div class=note>Or type a hidden SSID below.</div>"
             "<label>SSID (override)</label>"
@@ -75,7 +86,6 @@ String scanPage() {
             "<input name=pass type=password placeholder='WPA/WPA2 password'>"
             "<button type=submit>Save &amp; connect</button>"
             "</form>");
-  WiFi.scanDelete();
   return html;
 }
 
@@ -94,27 +104,33 @@ String savedPage(const String& ssid) {
 }
 
 void handleRoot(AsyncWebServerRequest* req) {
+  log_i("[portal] GET / from %s", req->client()->remoteIP().toString().c_str());
   req->send(200, "text/html", scanPage());
 }
 
 void handleSave(AsyncWebServerRequest* req) {
+  log_i("[portal] POST /save from %s", req->client()->remoteIP().toString().c_str());
   String ssid = req->hasParam("ssid_manual", true) && req->getParam("ssid_manual", true)->value().length()
                   ? req->getParam("ssid_manual", true)->value()
                   : (req->hasParam("ssid", true) ? req->getParam("ssid", true)->value() : String());
   String pass = req->hasParam("pass", true) ? req->getParam("pass", true)->value() : String();
 
   if (!ssid.length()) {
+    log_w("[portal] /save rejected: empty ssid");
     req->send(400, "text/plain", "ssid required");
     return;
   }
 
+  log_i("[portal] saving wifi ssid='%s' pass_len=%u",
+        ssid.c_str(), (unsigned)pass.length());
   if (g_settings) g_settings->setWifi(ssid, pass);
   req->send(200, "text/html", savedPage(ssid));
   g_pendingReconnect = true;
 }
 
 void handleCaptiveProbe(AsyncWebServerRequest* req) {
-  // Tell phones the network is captive so they pop the portal.
+  log_i("[portal] probe %s from %s",
+        req->url().c_str(), req->client()->remoteIP().toString().c_str());
   req->redirect(String("http://") + WiFi.softAPIP().toString() + "/");
 }
 
@@ -125,31 +141,41 @@ void begin(SettingsStore& settings) {
   if (!g_server) g_server = new AsyncWebServer(80);
   if (!g_dns)    g_dns    = new DNSServer();
 
-  // Wildcard hijack — every DNS query resolves to the AP IP.
+  log_i("[portal] begin on AP IP %s", WiFi.softAPIP().toString().c_str());
+
+  // Wildcard hijack: every DNS query resolves to the AP IP.
   g_dns->setErrorReplyCode(DNSReplyCode::NoError);
   g_dns->start(53, "*", WiFi.softAPIP());
+
+  // Request callbacks run in async_tcp's task. Keep slow radio scans out
+  // of that task or the AsyncTCP watchdog can reset the board when phones
+  // issue captive-portal probes.
+  refreshScanOptions();
 
   g_server->on("/",     HTTP_GET,  handleRoot);
   g_server->on("/save", HTTP_POST, handleSave);
 
   // Captive-portal probe URLs across vendors. Returning a redirect makes
   // the phone's OS pop the "Sign in to network" sheet, which auto-loads "/".
-  g_server->on("/generate_204",       HTTP_GET, handleCaptiveProbe); // Android
-  g_server->on("/gen_204",            HTTP_GET, handleCaptiveProbe);
-  g_server->on("/hotspot-detect.html", HTTP_GET, handleCaptiveProbe);// Apple
+  g_server->on("/generate_204",        HTTP_GET, handleCaptiveProbe); // Android
+  g_server->on("/gen_204",             HTTP_GET, handleCaptiveProbe);
+  g_server->on("/hotspot-detect.html", HTTP_GET, handleCaptiveProbe); // Apple
   g_server->on("/library/test/success.html", HTTP_GET, handleCaptiveProbe);
-  g_server->on("/connecttest.txt",    HTTP_GET, handleCaptiveProbe); // Windows
-  g_server->on("/ncsi.txt",           HTTP_GET, handleCaptiveProbe);
+  g_server->on("/connecttest.txt",     HTTP_GET, handleCaptiveProbe); // Windows
+  g_server->on("/ncsi.txt",            HTTP_GET, handleCaptiveProbe);
   g_server->onNotFound(handleCaptiveProbe);
 
   g_server->begin();
+  log_i("[portal] server started");
 }
 
 void end() {
+  log_i("[portal] end");
   if (g_dns) { g_dns->stop(); delete g_dns; g_dns = nullptr; }
   if (g_server) { g_server->end(); delete g_server; g_server = nullptr; }
   g_settings = nullptr;
   g_pendingReconnect = false;
+  g_scan_options = "";
 }
 
 void loop() {
@@ -157,6 +183,7 @@ void loop() {
   if (g_pendingReconnect && g_settings) {
     g_pendingReconnect = false;
     SettingsStore* s = g_settings;
+    log_i("[portal] reconnect requested");
     end();                       // tear down portal before mode switch
     wifi_mgr::retrySta(*s);      // may bring AP back up on failure
   }
