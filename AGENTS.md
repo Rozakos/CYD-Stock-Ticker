@@ -51,7 +51,7 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 36.0%**, **Flash 94.5%**. DRAM is the constraint when
+Last clean build: **RAM 36.1%**, **Flash 96.2%**. DRAM is the constraint when
 adding LVGL features. Two main levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
@@ -224,20 +224,129 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
-- **Runtime logo fetch + diagnostic mode** (2026-05, Codex): firmware now
+- **LOGO_TEST_MODE verdict: LVGL file-PNG render path is broken**
+  (2026-05-19): The user ran the `?test=1` synthetic 64×64 RGBA PNG (red
+  bg, green diagonal stripe, blue centre dot) on the IONQ row. Serial
+  logs show the full pipeline succeeds end-to-end on the loader side —
+  HTTP 200, 1270 bytes, fs.write/close/rename all `ok=1`, file cached at
+  `/logos/IONQ.png`, then the UI runs:
+
+      [logo] IONQ mount.start /logos/IONQ.png (1270 bytes)
+      [logo] IONQ mount.set_src L:/logos/IONQ.png
+      [logo] IONQ mount.dims=64x64 bytes=1270
+      [logo] IONQ runtime image mounted scale=136 inner=34
+
+  i.e. lodepng reports a correctly-sized 64×64 decoded image and LVGL
+  scales/mounts it. But the **rendered pixels never reach the
+  framebuffer** — the row shows just the grey-blue circular placeholder
+  (`box` background colour 0x94a3b8) with no image inside. Per the
+  diagnostic spec, that's the LVGL file-PNG render path failing
+  silently, not an API content issue.
+
+  **Recommended next step (handoff to Codex):** replace the
+  `lv_image_set_src(img, "L:/...")` path in `src/ui/logos.cpp` with an
+  in-memory ARGB8888 mount. Decode the cached PNG to RGBA8888 in a
+  malloc'd buffer (e.g. with `lodepng_decode32` directly, the same
+  decoder LVGL is already linking) and feed the buffer to LVGL via a
+  per-row `lv_image_dsc_t` with `header.cf = LV_COLOR_FORMAT_ARGB8888`
+  and `data = pixel_buffer`. That bypasses the LVGL FS + lazy-decode +
+  partial-render interaction that's eating the pixels and uses the
+  exact same code path the embedded `logos_data` table already uses
+  successfully. Each runtime logo would cost `64*64*4 = 16 KB` in DRAM;
+  freeing is the responsibility of the Row that owns the
+  `lv_image_dsc_t` (free in `rebuild_logo` when the dsc is replaced
+  and on row destruction).
+
+  Once that lands, flip `cfg::LOGO_TEST_MODE` to `false` in
+  `src/config.h` so the firmware requests real `/logo/<SYMBOL>` PNGs
+  again. The diagnostic scaffolding (granular `[logo] <SYM> fs.*` /
+  `mount.*` log lines, `monitor_filters = esp32_exception_decoder`
+  in `platformio.ini`) is fine to leave in — it only fires on the
+  non-embedded logo path and is helpful for future diagnostics.
+
+- **Logo cache: stop holding LittleFS lock during HTTP + free-space
+  guard** (2026-05-19): the upstream runtime-logo fetch held
+  `fs_littlefs::Guard` across the entire HTTPS receive loop (up to
+  10 s), which blocked the UI task whenever it touched LittleFS for
+  another logo — the device's touch screen "froze" for the duration of
+  every download of a newly-added symbol. Refactored `fetchLogo` to
+  buffer the body into a RAM `std::vector` (capped at 64 KB) and only
+  take the FS guard for the brief write + rename. PNG signature is
+  checked against the in-RAM buffer before any disk I/O.
+
+  Decoded a hard `IntegerDivideByZero` crash that fired on `f.close()`
+  for the IONQ logo: PC chain went through `lfs_alloc → lfs_file_relocate
+  → lfs_file_outline → ... → fs::File::close()`, with A3 (divisor) = 0.
+  Root cause: the LittleFS partition was wedged — `lfs->cfg->block_count`
+  was reading back as 0 because the allocator's free-block bookkeeping
+  had been corrupted by a previous over-commit. The partition is only
+  192 KB (down to 128 KB usable per LittleFS overhead, as observed
+  `total=131072`), and `data/logos/*.png` was carrying 149 KB of
+  pre-baked PNGs that get baked into the LittleFS image at `uploadfs`
+  time — leaving the runtime with virtually no headroom. Those PNGs are
+  pure build-time input for `sim/build_logo_arrays.py` (every symbol
+  in there is already embedded as ARGB8888 in `src/ui/logos_data.cpp`)
+  so they don't need to ship to the device.
+
+  **`data/` MUST stay empty on this project.** The logo source PNGs
+  moved to `sim/logo_src/` and `sim/build_logo_arrays.py` /
+  `sim/fetch_logos.py` were updated to point there. Anything else
+  going into `data/` will eat the same 128 KB partition headroom.
+
+  Added a defensive free-space check at the top of fetchLogo's FS
+  write block: if `LittleFS.totalBytes() - usedBytes() < body.size() +
+  8 KB`, the write is skipped with a log line. Never reaches
+  `lfs_alloc`. On a fresh empty partition the check logs
+  `[logo] <SYM> fs.space avail=110592 total=131072` — ~108 KB free.
+
+  Recovery path (only needed if the partition is currently wedged):
+
+      pio run -e cyd -t erase     # wipes ALL flash including settings.json
+      pio run -e cyd -t upload    # data/ is empty, no uploadfs needed
+      # device boots into captive-portal mode; re-onboard via QR
+
+- **Long-press a list row to pin a favourite** (2026-05-18): rows
+  long-pressed on the list screen get pinned to the top with a "* "
+  prefix on the symbol label. SettingsStore gained a `favourites` CSV
+  saved to `/settings.json`; list_screen partitions the snapshot
+  before laying out. The long-press handler defers the rebuild via a
+  `g_favourites_dirty` flag because `lv_obj_clean` from inside an
+  event handler use-after-frees the row obj on dispatch return.
+  `lv_buttonmatrix_get_selected_button` would also fire a CLICKED on
+  the row after the LONG_PRESSED so the click is swallowed via
+  `g_swallow_next_click`. Sim's `--longpress=X,Y` flag mirrors
+  `--click` but holds for 600 ms (LVGL default threshold = 400 ms).
+
+- **Detail chart: range-driven X format + downsample-don't-truncate
+  history** (2026-05-18): 5D X-axis stopped showing wrong-looking HH:MM
+  ("18:00 16:30 15:00") because the format was gated on the API's
+  `interval` field — the backend returns intraday-resolution data for
+  5d spanning 5 calendar days, and the three sampled ticks land on
+  three different days where HH:MM with no day component reads as
+  random. Format now follows the requested `range` (the user's mental
+  model). Only `range == "1d"` shows HH:MM. Separately, the 6M tab
+  was rendering ~30 days because the fetcher kept the last
+  HISTORY_POINTS (=30) points and dropped older ones; replaced with
+  uniform-index downsampling that preserves first/last across the
+  full requested window.
+
+- **Runtime logo fetch + diagnostic mode** (2026-05, Codex): firmware
   downloads missing, non-embedded logos from `/logo/{SYMBOL}` into
-  LittleFS as `/logos/<SYMBOL>.png`, then the existing UI fallback renders
-  them via `L:/logos/<SYMBOL>.png`. Embedded symbols are skipped so flash
-  logos do not waste API calls. Runtime logo rows rebuild their logo widget
-  on quote refresh so a badge can switch to a cached PNG without reboot.
+  LittleFS as `/logos/<SYMBOL>.png`, then the existing UI fallback
+  renders them via `L:/logos/<SYMBOL>.png`. Embedded symbols are
+  skipped so flash logos do not waste API calls. Runtime logo rows
+  rebuild their logo widget on quote refresh (gated by
+  `logos::signature()` so the widget only recreates when the source
+  actually changes — embedded rows skip the rebuild forever).
   **Temporary diagnostic is enabled** in
-  `src/net/quote_fetcher.cpp::kLogoApiTestMode`, appending `?test=1` to
-  non-embedded logo requests. Revert this to `false` after confirming
-  whether the CYD renders the stock-api synthetic red/green/blue PNG.
-  Runtime PNGs are wrapped in a neutral gray circular backing with a light
-  border while debugging logo contrast/rendering. Serial logs of interest:
-  `[SYMBOL] logo cached: ...`, `[logo] SYMBOL LittleFS ... dims=...`, and
-  `[logo] SYMBOL runtime image mounted ...`.
+  `src/config.h::cfg::LOGO_TEST_MODE`, appending `?test=1` to
+  non-embedded logo requests. Verdict above: revert to `false` only
+  once the in-memory ARGB8888 mount lands and the rendered pixels
+  actually show on screen.
+  Runtime PNGs are wrapped in a neutral gray circular backing with a
+  light border while debugging logo contrast/rendering. Serial logs of
+  interest: `[logo] SYM HTTP <status>`, `[logo] SYM bytes=<n>`,
+  `[logo] SYM cached <path>`, `[logo] SYM mount.dims=<w>x<h>`.
 - **Captive portal watchdog fix + onboarding logs** (2026-05, Codex):
   moved `WiFi.scanNetworks()` out of AsyncWebServer request callbacks after
   phones joining `CYD-Setup-*` triggered `async_tcp` task watchdog resets.
