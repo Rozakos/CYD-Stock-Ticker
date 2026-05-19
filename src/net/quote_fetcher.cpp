@@ -78,7 +78,7 @@ bool fetchLogo(const String& symbol, const String& token) {
   if (logos_data::find(symbol.c_str())) return true;
 
   String path = logoPath(symbol);
-  if (logoExists(path)) return true;
+  if (!kLogoApiTestMode && logoExists(path)) return true;
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -110,6 +110,7 @@ bool fetchLogo(const String& symbol, const String& token) {
   {
     fs_littlefs::Guard g;
     LittleFS.mkdir("/logos");
+    if (kLogoApiTestMode) LittleFS.remove(path);
     LittleFS.remove(tmp);
     File f = LittleFS.open(tmp, "w");
     if (!f) {
