@@ -33,12 +33,32 @@ struct CachedLogo {
 
 std::vector<CachedLogo> g_runtime_cache;
 
+struct PixelBounds {
+  uint32_t x0;
+  uint32_t y0;
+  uint32_t x1;
+  uint32_t y1;
+};
+
+enum class PngDecodePass : uint8_t {
+  Bounds,
+  Render,
+};
+
 struct PngDecodeCtx {
-  const std::vector<uint8_t>* png;
+  const uint8_t* png;
+  size_t pngSize;
   size_t pos;
-  std::vector<uint8_t>* pixels;
+  PngDecodePass pass;
   uint32_t srcW;
   uint32_t srcH;
+  PixelBounds bounds;
+  uint8_t* dst;
+  uint32_t dstSide;
+  uint32_t outW;
+  uint32_t outH;
+  uint32_t offX;
+  uint32_t offY;
 };
 
 String logoPath(const String& symbol) {
@@ -92,10 +112,10 @@ lv_obj_t* makeBadge(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
 uint32_t pngReadCb(void* userData, uint8_t* buf, uint32_t len) {
   auto* ctx = static_cast<PngDecodeCtx*>(userData);
   if (!ctx || !ctx->png) return 0;
-  size_t avail = ctx->png->size() - ctx->pos;
+  size_t avail = ctx->pngSize - ctx->pos;
   if (len > avail) len = (uint32_t)avail;
   if (buf && len) {
-    memcpy(buf, ctx->png->data() + ctx->pos, len);
+    memcpy(buf, ctx->png + ctx->pos, len);
   }
   ctx->pos += len;
   return len;
@@ -104,20 +124,53 @@ uint32_t pngReadCb(void* userData, uint8_t* buf, uint32_t len) {
 void pngDrawCb(void* userData, uint32_t x, uint32_t y,
                uint_fast8_t divX, size_t len, const uint8_t* argb) {
   auto* ctx = static_cast<PngDecodeCtx*>(userData);
-  if (!ctx || !ctx->pixels || !argb || !ctx->srcW || !ctx->srcH ||
-      y >= ctx->srcH) {
+  if (!ctx || !argb || !ctx->srcW || !ctx->srcH || y >= ctx->srcH) {
     return;
   }
 
   for (size_t i = 0; i < len; ++i) {
     uint32_t px = x + (uint32_t)i * divX;
-    if (px < ctx->srcW) {
-      uint8_t* out = ctx->pixels->data() + ((size_t)y * ctx->srcW + px) * 4;
-      // pngle emits A,R,G,B. LVGL ARGB8888 wants little-endian B,G,R,A.
-      out[0] = argb[i * 4 + 3];
-      out[1] = argb[i * 4 + 2];
-      out[2] = argb[i * 4 + 1];
-      out[3] = argb[i * 4 + 0];
+    if (px >= ctx->srcW) continue;
+
+    const uint8_t* in = argb + i * 4;
+    if (ctx->pass == PngDecodePass::Bounds) {
+      if (in[0] > 8) {
+        if (px < ctx->bounds.x0) ctx->bounds.x0 = px;
+        if (y < ctx->bounds.y0) ctx->bounds.y0 = y;
+        if (px + 1 > ctx->bounds.x1) ctx->bounds.x1 = px + 1;
+        if (y + 1 > ctx->bounds.y1) ctx->bounds.y1 = y + 1;
+      }
+      continue;
+    }
+
+    if (!ctx->dst || !ctx->dstSide || !ctx->outW || !ctx->outH ||
+        px < ctx->bounds.x0 || px >= ctx->bounds.x1 ||
+        y < ctx->bounds.y0 || y >= ctx->bounds.y1) {
+      continue;
+    }
+
+    uint32_t cropW = ctx->bounds.x1 - ctx->bounds.x0;
+    uint32_t cropH = ctx->bounds.y1 - ctx->bounds.y0;
+    uint32_t relX = px - ctx->bounds.x0;
+    uint32_t relY = y - ctx->bounds.y0;
+    uint32_t dx0 = ctx->offX + (relX * ctx->outW) / cropW;
+    uint32_t dx1 = ctx->offX + ((relX + 1) * ctx->outW + cropW - 1) / cropW;
+    uint32_t dy0 = ctx->offY + (relY * ctx->outH) / cropH;
+    uint32_t dy1 = ctx->offY + ((relY + 1) * ctx->outH + cropH - 1) / cropH;
+    if (dx1 <= dx0) dx1 = dx0 + 1;
+    if (dy1 <= dy0) dy1 = dy0 + 1;
+    if (dx1 > ctx->dstSide) dx1 = ctx->dstSide;
+    if (dy1 > ctx->dstSide) dy1 = ctx->dstSide;
+
+    for (uint32_t yy = dy0; yy < dy1; ++yy) {
+      for (uint32_t xx = dx0; xx < dx1; ++xx) {
+        uint8_t* out = ctx->dst + ((size_t)yy * ctx->dstSide + xx) * 4;
+        // pngle emits A,R,G,B. LVGL ARGB8888 wants little-endian B,G,R,A.
+        out[0] = in[3];
+        out[1] = in[2];
+        out[2] = in[1];
+        out[3] = in[0];
+      }
     }
   }
 }
@@ -127,13 +180,6 @@ uint8_t clampByte(float v) {
   if (v >= 255.0f) return 255;
   return (uint8_t)(v + 0.5f);
 }
-
-struct PixelBounds {
-  uint32_t x0;
-  uint32_t y0;
-  uint32_t x1;
-  uint32_t y1;
-};
 
 PixelBounds opaqueBounds(const std::vector<uint8_t>& src, uint32_t srcW,
                          uint32_t srcH) {
@@ -225,39 +271,72 @@ void resampleBgraFit(const std::vector<uint8_t>& src, uint32_t srcW,
   }
 }
 
+bool configureRenderBounds(PngDecodeCtx& ctx, uint32_t dstSide) {
+  if (ctx.bounds.x0 >= ctx.bounds.x1 || ctx.bounds.y0 >= ctx.bounds.y1) {
+    ctx.bounds = PixelBounds{0, 0, ctx.srcW, ctx.srcH};
+  }
+  uint32_t cropW = ctx.bounds.x1 - ctx.bounds.x0;
+  uint32_t cropH = ctx.bounds.y1 - ctx.bounds.y0;
+  if (!cropW || !cropH || !dstSide) return false;
+
+  float scaleX = (float)dstSide / (float)cropW;
+  float scaleY = (float)dstSide / (float)cropH;
+  float scale = (scaleX < scaleY) ? scaleX : scaleY;
+  ctx.outW = (uint32_t)((float)cropW * scale + 0.5f);
+  ctx.outH = (uint32_t)((float)cropH * scale + 0.5f);
+  if (ctx.outW < 1) ctx.outW = 1;
+  if (ctx.outH < 1) ctx.outH = 1;
+  if (ctx.outW > dstSide) ctx.outW = dstSide;
+  if (ctx.outH > dstSide) ctx.outH = dstSide;
+  ctx.offX = (dstSide - ctx.outW) / 2;
+  ctx.offY = (dstSide - ctx.outH) / 2;
+  ctx.dstSide = dstSide;
+  return true;
+}
+
 RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
                                lv_coord_t targetSide, size_t* fileBytes) {
-  std::vector<uint8_t> png;
+  uint8_t* png = nullptr;
+  size_t bytes = 0;
   {
     fs_littlefs::Guard g;
     File f = LittleFS.open(path, "rb");
     if (!f) return nullptr;
-    size_t bytes = f.size();
+    bytes = f.size();
     if (fileBytes) *fileBytes = bytes;
     if (bytes == 0 || bytes > MAX_RUNTIME_PNG_BYTES) {
       log_w("[logo] %s runtime skip bytes=%u",
             symbol.c_str(), (unsigned)bytes);
       return nullptr;
     }
-    png.resize(bytes);
-    size_t got = f.readBytes(reinterpret_cast<char*>(png.data()), bytes);
+    png = static_cast<uint8_t*>(std::malloc(bytes));
+    if (!png) {
+      log_w("[logo] %s runtime png buffer alloc failed bytes=%u",
+            symbol.c_str(), (unsigned)bytes);
+      return nullptr;
+    }
+    size_t got = f.readBytes(reinterpret_cast<char*>(png), bytes);
     f.close();
     if (got != bytes) {
       log_w("[logo] %s runtime short read got=%u want=%u",
             symbol.c_str(), (unsigned)got, (unsigned)bytes);
+      std::free(png);
       return nullptr;
     }
   }
 
   if (!logos::prepareRuntimeDecoder()) {
     log_w("[logo] %s runtime pngle alloc failed", symbol.c_str());
+    std::free(png);
     return nullptr;
   }
   pngle_t* pngle = g_pngle;
 
-  PngDecodeCtx ctx{&png, 0, nullptr, 0, 0};
+  PngDecodeCtx ctx{png, bytes, 0, PngDecodePass::Bounds, 0, 0,
+                   PixelBounds{0, 0, 0, 0}, nullptr, 0, 0, 0, 0, 0};
   if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0) {
     log_w("[logo] %s runtime prepare failed", symbol.c_str());
+    std::free(png);
     return nullptr;
   }
   unsigned w = lgfx_pngle_get_width(pngle);
@@ -267,22 +346,23 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
   if (w == 0 || h == 0 || targetSide <= 0) {
     log_w("[logo] %s runtime invalid dims=%ux%u target=%ld",
           symbol.c_str(), w, h, (long)targetSide);
+    std::free(png);
     return nullptr;
   }
   if (w > MAX_RUNTIME_LOGO_SIDE || h > MAX_RUNTIME_LOGO_SIDE) {
     log_w("[logo] %s runtime too large dims=%ux%u",
           symbol.c_str(), w, h);
+    std::free(png);
     return nullptr;
   }
 
-  std::vector<uint8_t> sourcePixels;
-  sourcePixels.resize((size_t)w * (size_t)h * 4);
-  ctx.pixels = &sourcePixels;
   ctx.srcW = w;
   ctx.srcH = h;
+  ctx.bounds = PixelBounds{w, h, 0, 0};
   if (lgfx_pngle_decomp(pngle, pngDrawCb) < 0) {
     log_w("[logo] %s runtime decomp failed dims=%ux%u",
           symbol.c_str(), w, h);
+    std::free(png);
     return nullptr;
   }
 
@@ -291,6 +371,7 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
   auto* logo = static_cast<RuntimeLogo*>(std::calloc(1, sizeof(RuntimeLogo)));
   if (!logo) {
     log_w("[logo] %s runtime descriptor alloc failed", symbol.c_str());
+    std::free(png);
     return nullptr;
   }
   logo->pixels = static_cast<uint8_t*>(std::malloc(pixelBytes));
@@ -298,9 +379,28 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
     log_w("[logo] %s runtime pixel alloc failed bytes=%u",
           symbol.c_str(), (unsigned)pixelBytes);
     std::free(logo);
+    std::free(png);
     return nullptr;
   }
-  resampleBgraFit(sourcePixels, w, h, logo->pixels, outSide);
+  memset(logo->pixels, 0, pixelBytes);
+
+  if (!configureRenderBounds(ctx, outSide)) {
+    log_w("[logo] %s runtime render bounds invalid", symbol.c_str());
+    destroyRuntimeLogo(logo);
+    std::free(png);
+    return nullptr;
+  }
+  ctx.pos = 0;
+  ctx.pass = PngDecodePass::Render;
+  ctx.dst = logo->pixels;
+  if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0 ||
+      lgfx_pngle_decomp(pngle, pngDrawCb) < 0) {
+    log_w("[logo] %s runtime render pass failed", symbol.c_str());
+    destroyRuntimeLogo(logo);
+    std::free(png);
+    return nullptr;
+  }
+  std::free(png);
 
   logo->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
   logo->dsc.header.cf = LV_COLOR_FORMAT_ARGB8888;
