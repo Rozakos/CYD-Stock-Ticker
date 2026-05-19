@@ -83,6 +83,8 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
     }
   }
   if (exists) {
+    log_i("[logo] %s mount.start %s (%u bytes)",
+          up.c_str(), path.c_str(), (unsigned)bytes);
     lv_obj_t* box = lv_obj_create(parent);
     lv_obj_set_size(box, size, size);
     lv_obj_set_style_radius(box, LV_RADIUS_CIRCLE, 0);
@@ -96,12 +98,14 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
 
     lv_obj_t* img = lv_image_create(box);
     String lvPath = String("L:") + path;
+    log_i("[logo] %s mount.set_src %s", up.c_str(), lvPath.c_str());
     lv_image_set_src(img, lvPath.c_str());
+    log_i("[logo] %s mount.get_dims", up.c_str());
     int32_t iw = lv_image_get_src_width(img);
     int32_t ih = lv_image_get_src_height(img);
+    log_i("[logo] %s mount.dims=%ldx%ld bytes=%u",
+          up.c_str(), (long)iw, (long)ih, (unsigned)bytes);
     if (iw > 0 && ih > 0) {
-      log_i("[logo] %s LittleFS %s bytes=%u dims=%ldx%ld",
-            up.c_str(), path.c_str(), (unsigned)bytes, (long)iw, (long)ih);
       int32_t inner = size - 4;
       int32_t scale = (inner * 256) / iw;
       if (scale != 256) lv_image_set_scale(img, scale);

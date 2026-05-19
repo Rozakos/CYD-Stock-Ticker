@@ -157,17 +157,23 @@ bool fetchLogo(const String& symbol, const String& token) {
   }
 
   String tmp = path + ".tmp";
+  log_i("[logo] %s fs.lock", symbol.c_str());
   {
     // Held only across the (fast) write + rename — never the HTTP recv.
     fs_littlefs::Guard g;
+    log_i("[logo] %s fs.mkdir", symbol.c_str());
     LittleFS.mkdir("/logos");
+    log_i("[logo] %s fs.remove_tmp", symbol.c_str());
     LittleFS.remove(tmp);
+    log_i("[logo] %s fs.open_tmp", symbol.c_str());
     File f = LittleFS.open(tmp, "w");
     if (!f) {
       log_w("[logo] %s cache open failed", symbol.c_str());
       return false;
     }
+    log_i("[logo] %s fs.write %u", symbol.c_str(), (unsigned)body.size());
     size_t wrote = f.write(body.data(), body.size());
+    log_i("[logo] %s fs.close (wrote=%u)", symbol.c_str(), (unsigned)wrote);
     f.close();
     if (wrote != body.size()) {
       log_w("[logo] %s write short: %u/%u", symbol.c_str(),
@@ -175,8 +181,11 @@ bool fetchLogo(const String& symbol, const String& token) {
       LittleFS.remove(tmp);
       return false;
     }
+    log_i("[logo] %s fs.remove_old", symbol.c_str());
     LittleFS.remove(path);   // unconditional overwrite — no stale cache
+    log_i("[logo] %s fs.rename", symbol.c_str());
     ok = LittleFS.rename(tmp, path);
+    log_i("[logo] %s fs.done ok=%d", symbol.c_str(), (int)ok);
     if (!ok) LittleFS.remove(tmp);
   }
 
