@@ -30,7 +30,7 @@ struct History {
 
 struct HistoryRequest {
   String   symbol;
-  String   range;   // API range token: "1d", "5d", "1w", "1mo", "6mo", ...
+  String   range;   // API range token: "1d", "1w", "1mo", "6mo", "1y", ...
   uint32_t gen = 0;
 };
 

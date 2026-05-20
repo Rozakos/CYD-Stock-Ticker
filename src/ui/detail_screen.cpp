@@ -33,16 +33,16 @@ static constexpr int MARKER_DOT_SIZE = 8;
 static constexpr int MARKER_TOP_BAND_PCT = 15;
 static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 
-// Range buttons. Button index → API range token. The label seen on the
-// btnmatrix is `g_range_labels[]`; the value sent in `?range=` is
+// Range buttons. Button index -> API range token. The label seen on the
+// button is `g_range_labels[]`; the value sent in `?range=` is
 // `g_range_api[]`. Keep both arrays in lock-step.
-static constexpr int kNumRanges       = 5;
-static constexpr int kDefaultRangeIdx = 3;     // "1M"
+static constexpr int kNumRanges       = 7;
+static constexpr int kDefaultRangeIdx = 2;     // "1M"
 static const char* g_range_labels[] = {
-    "1D", "5D", "1W", "1M", "6M", ""
+    "1D", "1W", "1M", "6M", "1Y", "5Y", "Max"
 };
 static const char* g_range_api[kNumRanges] = {
-    "1d", "5d", "1w", "1mo", "6mo"
+    "1d", "1w", "1mo", "6mo", "1y", "5y", "max"
 };
 
 static const char* kMonths[] = {
@@ -222,7 +222,7 @@ void build_once() {
   lv_obj_add_style(g_back_hint, &styles::muted, 0);
   lv_label_set_text(g_back_hint, LV_SYMBOL_LEFT " tap");
 
-  // Range button row — 5 individual lv_button widgets inside a flex
+  // Range button row — individual lv_button widgets inside a flex
   // container. Each button's index is baked into its CLICKED event's
   // user_data, so the index-to-API mapping cannot be confused by hit-
   // test mirroring inside a multi-cell widget. (lv_buttonmatrix was
@@ -485,7 +485,7 @@ void render_history(const History& h) {
         first, last, chart_change, (unsigned long)h.closes.size());
 
   // The detail header reflects the selected chart window. The list screen
-  // still shows the quote's published day change; here 5D/1W/1M/6M should
+  // still shows the quote's published day change; here every longer range should
   // show gain/loss from this history's first point to its last point.
   float change = chart_change;
   bool up = change >= 0;

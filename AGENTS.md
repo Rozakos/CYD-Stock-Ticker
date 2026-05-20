@@ -107,8 +107,8 @@ src/
   last N closes get stored on `Quote::sparkline`. The list draws them with
   `lv_line` (one per row) — no extra API calls.
 - **Detail history / range contract**: range buttons request
-  `/history/{SYMBOL}?range=<token>` where tokens are `1d`, `5d`, `1w`,
-  `1mo`, and `6mo`. The API server is responsible for selecting the
+  `/history/{SYMBOL}?range=<token>` where tokens are `1d`, `1w`, `1mo`,
+  `6mo`, `1y`, `5y`, and `max`. The API server is responsible for selecting the
   correct date/window and returning ordered `points[]` with `ts` and `last`
   plus top-level `interval` (`intraday` or `daily`). The firmware does not
   calculate which dates belong to "1W" or fetch from Google/Yahoo directly.
