@@ -329,7 +329,8 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   filter["points"][0]["last"] = true;
   filter["points"][0]["ts"]   = true;
 
-  String url = String(cfg::API_BASE) + "/history/" + symbol + "?range=" + range;
+  String url = String(cfg::API_BASE) + "/history/" + symbol + "?range=" + range +
+               "&limit=" + String(cfg::HISTORY_POINTS);
   JsonDocument doc;
   if (!fetchAndParse(url, token, filter, doc)) {
     if (store.historyGenCurrent(gen)) store.setHistoryError(true);
