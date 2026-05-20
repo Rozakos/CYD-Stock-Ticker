@@ -51,7 +51,7 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 36.1%**, **Flash 96.2%**. DRAM is the constraint when
+Last clean build: **RAM 36.1%**, **Flash 83.1%**. DRAM is the constraint when
 adding LVGL features. Two main levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
@@ -122,10 +122,15 @@ src/
   (`src/ui/logos_data.{cpp,h}`, generated from `sim/logo_src/*.png` by
   `sim/build_logo_arrays.py`). If the symbol isn't bundled, it falls
   back to a cached runtime LittleFS PNG (`/logos/<SYMBOL>.png`), decodes
-  it with LovyanGFX `pngle` into a malloc'd ARGB8888 `lv_image_dsc_t`,
-  and mounts that in memory; if decode/cache is missing it draws the
-  circular brand-coloured letter badge. Both embedded and runtime paths
-  now skip LVGL's file-backed PNG renderer, which reported good dimensions
+  it with LovyanGFX `pngle` into a 48×48 ARGB8888 `lv_image_dsc_t`,
+  and mounts that in memory; LVGL bilinearly scales 48→display-slot at
+  draw time (same path as embedded ARGB logos, no on-device downscale).
+  If decode/cache is missing it draws the circular brand-coloured
+  letter badge. The runtime PNG comes from the API at 48×48 (`fetchLogo`
+  always appends `?size=48`); the cache-hit check reads the cached
+  file's IHDR and refetches if the dims aren't 48×48 (handles upgrades
+  from the older 64×64 API response). Both embedded and runtime paths
+  skip LVGL's file-backed PNG renderer, which reported good dimensions
   but dropped pixels on the CYD. To add or refresh embedded logos: drop
   PNGs into `sim/logo_src/` and run `python sim/build_logo_arrays.py` from
   the project root.
@@ -229,6 +234,57 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Runtime logos match embedded quality via API `?size=48`**
+  (2026-05-20): runtime logos looked visibly pixelated next to
+  embedded AMD/MSFT/NVDA because the firmware was box-filter
+  downscaling 64×64 PNGs to a 38×38 cache. Several on-device-only
+  approaches were tried first (cache at 64×64, persistent pngle,
+  pool + arena allocator, boot-time decode) — every one of them
+  blew past the heap budget because lodepng's transient peak on a
+  64×64 RGBA PNG is ~60 KB and the largest contiguous internal
+  block after WiFi+TLS is ~40 KB. Fixed instead by serving the
+  smaller resolution from the API:
+
+  - **API** (`Rozakos/stock-api` commit "Add ?size= query param to
+    /logo endpoint"): `/stocks/api/v1/logo/{symbol}` now accepts
+    `?size=` ∈ {32, 48, 64}, defaults to 64 (back-compat). Other
+    sizes resize the cached 64×64 source via PIL LANCZOS, preserve
+    RGBA, return as `Response` with the same
+    `Cache-Control: public, max-age=2592000, immutable` as the
+    FileResponse branch. Anything else → 400.
+
+  - **Firmware** (`src/net/quote_fetcher.cpp`): `fetchLogo`
+    appends `?size=48` (and `&test=1` in LOGO_TEST_MODE).
+    Cache-hit check now also reads the cached PNG's IHDR
+    (`logoDims()` parses bytes 16..23) and treats it as stale if
+    width≠48 or height≠48, so devices upgrading from the older API
+    response don't show 64×64 leftovers forever. The next refresh
+    re-fetches.
+
+  - **Firmware** (`src/ui/logos.cpp`): `RUNTIME_LOGO_CACHE_SIDE`
+    is now 48. With source==dest the homebrew downscaler does a
+    1:1 copy (changed the accumulator gate from `>=` to strict `>`
+    so the 23 KB "smooth buffer" isn't allocated at all in the
+    common case). LVGL bilinearly scales 48→display-slot at draw
+    time, same code path as embedded ARGB logos.
+
+  Cost: ~9 KB DRAM per runtime logo (vs ~5.8 KB before). Verified
+  on device with AMD/NVDA/NOW/NKE — `[logo] X cache stale dims=
+  64x64, refetching` fires once per stale file, then `runtime
+  source dims=48x48 target=48` confirms the API returned native
+  48×48, and `runtime mounted argb=48x48` lands without any
+  accumulator warning. SSL/quotes refresh on the normal 30 s
+  cadence; no boot-loop or OOM. Logos visually indistinguishable
+  from embedded MSFT/NVDA.
+
+  Heap pressure baseline that informed the call (for future
+  decoder work): internal heap starts ~256 KB free / ~110 KB
+  largest; LVGL+LovyanGFX init drops it to ~210/80; WiFi STA
+  connect to ~130/80; first TLS handshake to ~100/**40**. The
+  40 KB largest-contiguous ceiling is the killer — TLS needs
+  ~32–50 KB scratch, lodepng/pngle's transient peak is ~60 KB on a
+  64×64 RGBA PNG, both can't fit simultaneously on this board.
 
 - **Runtime logos render via in-memory ARGB8888, not LVGL file PNG**
   (2026-05-19, Codex): replaced `lv_image_set_src(img, "L:/logos/...")`

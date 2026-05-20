@@ -16,7 +16,11 @@ namespace {
 
 constexpr size_t MAX_RUNTIME_PNG_BYTES = 64 * 1024;
 constexpr unsigned MAX_RUNTIME_LOGO_SIDE = 128;
-constexpr uint32_t RUNTIME_LOGO_CACHE_SIDE = 38;
+// Matches the size the API serves now (see fetcher's ?size=48). Caching
+// at the source resolution means the pngle callback writes pixels 1:1
+// into the slot and LVGL bilinearly scales 48→38 at draw time, the
+// same path the embedded logos take. No homebrew downscale.
+constexpr uint32_t RUNTIME_LOGO_CACHE_SIDE = 48;
 
 pngle_t* g_pngle = nullptr;
 
@@ -425,7 +429,11 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
   ctx.dst = logo->pixels;
   uint32_t cropW = ctx.bounds.x1 - ctx.bounds.x0;
   uint32_t cropH = ctx.bounds.y1 - ctx.bounds.y0;
-  if (cropW >= ctx.outW && cropH >= ctx.outH) {
+  // Strict `>`: at source==dest (the common case now that the API
+  // serves 48x48 to match RUNTIME_LOGO_CACHE_SIDE) the draw callback's
+  // direct-write path does a clean 1:1 copy and the 23 KB accumulator
+  // isn't needed.
+  if (cropW > ctx.outW && cropH > ctx.outH) {
     size_t accumBytes = (size_t)outSide * outSide * 5 * sizeof(uint16_t);
     ctx.accum = static_cast<uint16_t*>(std::calloc(1, accumBytes));
     if (!ctx.accum) {

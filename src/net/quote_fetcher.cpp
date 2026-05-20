@@ -69,20 +69,56 @@ bool logoExists(const String& path) {
   return LittleFS.exists(path);
 }
 
+// Parses the PNG IHDR width/height from a LittleFS file. Returns false
+// if the file is missing, too short, or doesn't start with the PNG
+// signature. Used to invalidate cached logos served by an older API
+// build that returned a different resolution.
+bool logoDims(const String& path, uint32_t& w, uint32_t& h) {
+  fs_littlefs::Guard g;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  uint8_t hdr[24];
+  size_t got = f.readBytes(reinterpret_cast<char*>(hdr), sizeof(hdr));
+  f.close();
+  if (got != sizeof(hdr)) return false;
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  static const uint8_t kSig[8] = {0x89, 0x50, 0x4E, 0x47,
+                                  0x0D, 0x0A, 0x1A, 0x0A};
+  if (memcmp(hdr, kSig, 8) != 0) return false;
+  // bytes 16..23 are IHDR width/height (big-endian uint32).
+  w = (uint32_t(hdr[16]) << 24) | (uint32_t(hdr[17]) << 16) |
+      (uint32_t(hdr[18]) << 8)  |  uint32_t(hdr[19]);
+  h = (uint32_t(hdr[20]) << 24) | (uint32_t(hdr[21]) << 16) |
+      (uint32_t(hdr[22]) << 8)  |  uint32_t(hdr[23]);
+  return true;
+}
+
 bool fetchLogo(const String& symbol, const String& token) {
   // Embedded ARGB8888 logos in `logos_data` bypass the runtime PNG path
   // entirely; nothing to do at the fetch layer.
   if (logos_data::find(symbol.c_str())) return true;
 
   String path = logoPath(symbol);
-  // Cache check: skip the HTTP round-trip when we already have the file.
-  // In LOGO_TEST_MODE we always re-fetch and overwrite — the server sends
-  // Cache-Control: no-store and we don't want a stale cached file
-  // masking the rendering pipeline behaviour we're diagnosing.
-  if (!cfg::LOGO_TEST_MODE && logoExists(path)) return true;
+  // Cache check: skip the HTTP round-trip when we already have a
+  // matching file. A cached PNG counts as a hit only if its IHDR
+  // dimensions match the size we'd request now (48x48). Anything else
+  // is an older build's leftover and gets re-fetched. In LOGO_TEST_MODE
+  // we always re-fetch — the server sends Cache-Control: no-store and
+  // we don't want a cached file masking the rendering pipeline.
+  if (!cfg::LOGO_TEST_MODE && logoExists(path)) {
+    uint32_t cw = 0, ch = 0;
+    if (logoDims(path, cw, ch) && cw == 48 && ch == 48) return true;
+    log_i("[logo] %s cache stale dims=%ux%u, refetching",
+          symbol.c_str(), (unsigned)cw, (unsigned)ch);
+  }
 
-  String url = String(cfg::API_BASE) + "/logo/" + symbol;
-  if (cfg::LOGO_TEST_MODE) url += "?test=1";
+  // Request 48x48 PNGs so lodepng's transient decode peak stays under
+  // the ~40 KB largest-contiguous heap ceiling we see after WiFi+TLS.
+  // The cache slot then mounts at native 48x48 and LVGL bilinearly
+  // scales to the 38 px display slot — same code path as embedded
+  // logos, no homebrew resample.
+  String url = String(cfg::API_BASE) + "/logo/" + symbol + "?size=48";
+  if (cfg::LOGO_TEST_MODE) url += "&test=1";
   log_i("[logo] %s GET %s", symbol.c_str(), url.c_str());
 
   WiFiClientSecure client;
