@@ -79,7 +79,7 @@ still looks coherent without code changes.
 
 ## Logos
 
-A few common symbols (AMD, MSFT, NVDA) are compiled in as ARGB8888 arrays.
+AMD is compiled in as an ARGB8888 array (lives in flash, costs no heap).
 For everything else the firmware fetches `GET /logo/{symbol}?size=48` on
 demand, caches the PNG in LittleFS (`/logos/<SYMBOL>.png`), and decodes it to
 an in-memory ARGB8888 image with pngle — the same render path the embedded
