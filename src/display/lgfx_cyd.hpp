@@ -66,13 +66,18 @@ class LGFX_CYD : public lgfx::LGFX_Device {
       cfg.freq            = 1000000;
       cfg.bus_shared      = false;
       cfg.offset_rotation = 0;
-      // Touch is mirrored 180° from the display in landscape. Keep both axes
-      // inverted here; UI widgets that need logical left/right correction
-      // handle that explicitly.
+      // The panel runs landscape via setRotation(1), but the touch controller
+      // stays at offset_rotation=0 — so the touch's RAW axes are rotated 90°
+      // vs the screen: raw-X maps to SCREEN-VERTICAL, raw-Y maps to
+      // SCREEN-HORIZONTAL. The horizontal touch was mirrored (tapping the
+      // top-right gear fired the top-left WiFi reset; modal Cancel fired
+      // Reset). Because raw-Y is the screen-horizontal axis, the fix is to
+      // reverse Y (200..3850), NOT X. X (3900..300) is left as-is — it gives
+      // the correct vertical mapping (row taps land on the right row).
       cfg.x_min           = 3900;
       cfg.x_max           = 300;
-      cfg.y_min           = 3850;
-      cfg.y_max           = 200;
+      cfg.y_min           = 200;
+      cfg.y_max           = 3850;
       cfg.pin_int         = 36;
       cfg.pin_cs          = 33;
       cfg.pin_sclk        = 25;

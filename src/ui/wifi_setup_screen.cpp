@@ -102,13 +102,35 @@ void show(const String& ap_ssid, const String& ap_pass) {
 
 void tick() {
   if (!g_active || !g_status) return;
-  if (wifi_mgr::connected()) {
-    lv_label_set_text_fmt(g_status, "connected — %s",
-                          wifi_mgr::ip().c_str());
-    lv_obj_set_style_text_color(g_status, styles::up_color(), 0);
-  } else if (wifi_mgr::apActive()) {
-    lv_label_set_text(g_status, "waiting for setup...");
-    lv_obj_set_style_text_color(g_status, styles::muted_color(), 0);
+
+  switch (wifi_mgr::staStatus()) {
+    case wifi_mgr::StaStatus::Connecting: {
+      // Animate the dots so the ~15s blocking join attempt reads as "alive"
+      // rather than frozen (the whole reason for this screen's feedback).
+      static uint8_t frame = 0;
+      frame = (uint8_t)((frame + 1) & 3);
+      char buf[24];
+      snprintf(buf, sizeof(buf), "Connecting%.*s", (int)frame, "...");
+      lv_label_set_text(g_status, buf);
+      lv_obj_set_style_text_color(g_status, styles::muted_color(), 0);
+      break;
+    }
+    case wifi_mgr::StaStatus::Connected:
+      lv_label_set_text_fmt(g_status, LV_SYMBOL_OK " Connected\n%s",
+                            wifi_mgr::ip().c_str());
+      lv_obj_set_style_text_color(g_status, styles::up_color(), 0);
+      break;
+    case wifi_mgr::StaStatus::Failed:
+      lv_label_set_text_fmt(g_status,
+                            LV_SYMBOL_WARNING " %s.\nRejoin the setup AP\nand try again.",
+                            wifi_mgr::lastFailMessage());
+      lv_obj_set_style_text_color(g_status, styles::dn_color(), 0);
+      break;
+    case wifi_mgr::StaStatus::Idle:
+    default:
+      lv_label_set_text(g_status, "Waiting for setup...");
+      lv_obj_set_style_text_color(g_status, styles::muted_color(), 0);
+      break;
   }
 }
 

@@ -326,6 +326,8 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
 
   JsonDocument filter;
   filter["interval"]          = true;
+  filter["session_open"]      = true;   // range=1d only; absent otherwise
+  filter["session_close"]     = true;
   filter["points"][0]["last"] = true;
   filter["points"][0]["ts"]   = true;
 
@@ -401,11 +403,13 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
         (long)first_ts, (long)last_ts);
 
   History h;
-  h.symbol     = symbol;
-  h.range      = range;
-  h.interval   = interval;
-  h.closes     = std::move(closes);
-  h.timestamps = std::move(timestamps);
+  h.symbol        = symbol;
+  h.range         = range;
+  h.interval      = interval;
+  h.closes        = std::move(closes);
+  h.timestamps    = std::move(timestamps);
+  h.session_open  = (time_t)(doc["session_open"]  | (long long)0);
+  h.session_close = (time_t)(doc["session_close"] | (long long)0);
   if (!store.historyGenCurrent(gen)) return false;
   store.setHistory(std::move(h));
   store.setHistoryError(false);

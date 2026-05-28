@@ -60,6 +60,11 @@ bool        g_active     = false;
 bool        g_rendered   = false;
 bool        g_loading    = false;
 bool        g_showed_err = false;
+// True from show() until the first real chart for this symbol has rendered.
+// Gates the daily-sparkline fallback so it only fills the initial blank — on
+// a later range switch we keep a clean blank+spinner instead of flickering
+// the sparkline in before the requested range arrives.
+bool        g_first_load = true;
 // g_range_idx = range currently DISPLAYED on the chart (what the chart's
 // data and the active-button highlight both reflect).
 // g_pending_range_idx = range the user most recently asked for; a fetch
@@ -74,7 +79,7 @@ lv_obj_t* g_card       = nullptr;
 lv_obj_t* g_header     = nullptr;
 lv_obj_t* g_logo_slot  = nullptr;
 lv_obj_t* g_title      = nullptr;
-lv_obj_t* g_back_hint  = nullptr;
+lv_obj_t* g_back_btn   = nullptr;
 lv_obj_t* g_price      = nullptr;
 lv_obj_t* g_change     = nullptr;
 lv_obj_t* g_btn_row    = nullptr;
@@ -95,7 +100,7 @@ int32_t g_fill_x[CR_MAX_OUT];
 int32_t g_fill_y[CR_MAX_OUT];
 int32_t g_fill_bottom_y   = 0;
 
-void on_tap(lv_event_t*) {
+void on_back(lv_event_t*) {
   g_active = false;
   lv_screen_load(list_screen::screen());
 }
@@ -112,24 +117,27 @@ void on_range_clicked(lv_event_t* e) {
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   if (idx < 0 || idx >= kNumRanges) return;
   if (idx == g_range_idx) return;   // already on this range
-  // Do NOT commit g_range_idx yet — keep the previous range "active"
-  // visually so the highlighted button always matches the data on the
-  // chart. The new range becomes active in render_history once the new
-  // data has been drawn. start_history_fetch reads g_pending_range_idx
-  // for the API call.
+  // Commit the pending range and highlight its button IMMEDIATELY so the tap
+  // gets instant visual acknowledgement (the data and accent colour still
+  // catch up in render_history). g_range_idx — the "displayed" range — only
+  // moves once the new data is actually on screen.
   g_pending_range_idx = idx;
+  apply_range_styles();
   start_history_fetch();
 }
 
-// Apply CHECKED-state visuals: active button gets the accent bg colour,
-// inactive ones get the muted card-frame colour. Called whenever
-// g_range_idx changes and when the up/down accent flips in render_history.
+// Apply CHECKED-state visuals: the pending (just-tapped) button gets the
+// accent bg colour, inactive ones get the muted card-frame colour. Tracking
+// g_pending_range_idx (not g_range_idx) means the highlight follows the tap
+// instantly, before the fetch completes — the user sees which range they
+// asked for right away. Called on tap, on error-revert, and when the up/down
+// accent flips in render_history.
 void apply_range_styles() {
   lv_color_t accent = g_line_color;
   for (int i = 0; i < kNumRanges; ++i) {
     lv_obj_t* b = g_range_btns[i];
     if (!b) continue;
-    if (i == g_range_idx) {
+    if (i == g_pending_range_idx) {
       lv_obj_set_style_bg_color(b, accent,          LV_PART_MAIN);
       lv_obj_set_style_bg_opa  (b, LV_OPA_80,       LV_PART_MAIN);
       lv_obj_set_style_text_color(b, lv_color_hex(0x0b0f17), LV_PART_MAIN);
@@ -146,12 +154,18 @@ void start_history_fetch() {
   g_loading    = true;
   g_showed_err = false;
   g_rendered   = false;
-  if (g_spinner)   lv_obj_remove_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
-  if (g_err_label) lv_obj_add_flag   (g_err_label, LV_OBJ_FLAG_HIDDEN);
-  // Hide the marker / fill data while the new range loads so we don't
-  // briefly render stale labels at the old data's coordinates.
-  if (g_marker_dot) lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
+  // Clear the previous range's curve and pop a prominent spinner so the
+  // switch reads as "loading" right away instead of looking frozen until the
+  // network round-trip lands. The marker/fill go with it (stale geometry).
+  lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   g_fill_n = 0;
+  if (g_marker_dot) lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
+  if (g_err_label)  lv_obj_add_flag(g_err_label,  LV_OBJ_FLAG_HIDDEN);
+  if (g_spinner) {
+    lv_obj_remove_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_spinner);   // above the (now blank) chart
+  }
+  lv_obj_invalidate(g_chart);
   g_store->requestHistory(g_symbol, g_range_api[g_pending_range_idx]);
 }
 
@@ -186,10 +200,11 @@ void build_once() {
   lv_obj_set_style_bg_opa(g_scr, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(g_scr, 8, 0);
   lv_obj_clear_flag(g_scr, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(g_scr, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(g_scr, on_tap, LV_EVENT_CLICKED, nullptr);
+  // No whole-screen tap handler — tapping the chart/header must NOT navigate
+  // back. Only the explicit back button (top-right of the header) returns to
+  // the list.
 
-  // Compact single-row header: [logo] [symbol] [price] (flex grow) [chg %] [back hint]
+  // Compact single-row header: [logo] [symbol] [price] (flex grow) [chg %] [back btn]
   g_header = lv_obj_create(g_scr);
   lv_obj_remove_style_all(g_header);
   lv_obj_set_size(g_header, cfg::SCREEN_W - 16, HEADER_H);
@@ -218,9 +233,28 @@ void build_once() {
   lv_obj_add_style(g_change, &styles::price, 0);
   lv_label_set_text(g_change, "loading…");
 
-  g_back_hint = lv_label_create(g_header);
-  lv_obj_add_style(g_back_hint, &styles::muted, 0);
-  lv_label_set_text(g_back_hint, LV_SYMBOL_LEFT " tap");
+  // Spacer with flex-grow pushes the back button to the far right of the
+  // header so the logo/symbol/price/change stay packed at the left.
+  lv_obj_t* spacer = lv_obj_create(g_header);
+  lv_obj_remove_style_all(spacer);
+  lv_obj_set_height(spacer, 1);
+  lv_obj_set_flex_grow(spacer, 1);
+  lv_obj_add_flag(spacer, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  // Real tappable back button (top-right). The only way back to the list.
+  g_back_btn = lv_button_create(g_header);
+  lv_obj_remove_style_all(g_back_btn);
+  lv_obj_set_size(g_back_btn, 34, HEADER_H - 4);
+  lv_obj_set_style_radius(g_back_btn, 6, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(g_back_btn, lv_color_hex(0x2a3548), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(g_back_btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_ext_click_area(g_back_btn, 10);   // generous hit-box on a small panel
+  lv_obj_add_event_cb(g_back_btn, on_back, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* back_lbl = lv_label_create(g_back_btn);
+  lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xe7eef7), LV_PART_MAIN);
+  lv_obj_center(back_lbl);
 
   // Range button row — individual lv_button widgets inside a flex
   // container. Each button's index is baked into its CLICKED event's
@@ -253,16 +287,11 @@ void build_once() {
     lv_label_set_text(lbl, g_range_labels[i]);
     lv_obj_center(lbl);
 
-    // Firmware touch X is mirrored by the panel calibration. Keep the sim's
-    // hit-test natural, but reverse the firmware user_data so a physical tap
-    // on the left-to-right visual button requests that same logical range.
-#if SIM_BUILD
-    int logical_idx = i;
-#else
-    int logical_idx = kNumRanges - 1 - i;
-#endif
+    // Touch X is no longer mirrored (fixed in lgfx_cyd.hpp), so the button's
+    // logical index matches its visual position directly — no per-platform
+    // reversal needed.
     lv_obj_add_event_cb(b, on_range_clicked, LV_EVENT_CLICKED,
-                        (void*)(intptr_t)logical_idx);
+                        (void*)(intptr_t)i);
     g_range_btns[i] = b;
   }
 
@@ -299,9 +328,9 @@ void build_once() {
                               LV_CHART_AXIS_PRIMARY_Y);
 
   g_spinner = lv_spinner_create(g_card);
-  lv_obj_set_size(g_spinner, 36, 36);
+  lv_obj_set_size(g_spinner, 40, 40);
   lv_obj_center(g_spinner);
-  lv_obj_set_style_opa(g_spinner, LV_OPA_50, 0);
+  lv_obj_set_style_opa(g_spinner, LV_OPA_COVER, 0);   // prominent, not a faint hint
 
   // Centered "no data" label, shown on fetch failure. Stays inside the
   // card so the user can still tap a different range button — which sits
@@ -372,7 +401,9 @@ float pick_step(float range) {
 }
 
 void render_history(const History& h) {
-  if (h.symbol != g_symbol || h.closes.empty()) return;
+  // Need at least 2 points: the interpolation, fill, marker and X-label code
+  // all divide by (count - 1). A single-point history would divide by zero.
+  if (h.symbol != g_symbol || h.closes.size() < 2) return;
   if (h.range.length() && h.range != g_range_api[g_pending_range_idx]) return;
   lv_obj_add_flag(g_spinner, LV_OBJ_FLAG_HIDDEN);
 
@@ -448,27 +479,84 @@ void render_history(const History& h) {
   // that uniform Catmull-Rom was producing on noisy daily close series.
   int n = (int)h.closes.size();
   static float g_cr_buf[CR_MAX_OUT];
-  int out_n = (n > 1) ? (n - 1) * CR_FACTOR + 1 : n;
+  int out_n = (n - 1) * CR_FACTOR + 1;   // n >= 2 guaranteed above
   if (out_n > CR_MAX_OUT) out_n = CR_MAX_OUT;
   util::monotone_cubic_interpolate(h.closes.data(), n, g_cr_buf, out_n, CR_FACTOR);
 
-  lv_chart_set_point_count(g_chart, out_n);
-  for (int i = 0; i < out_n; ++i) {
-    lv_chart_set_value_by_id(g_chart, g_ser, i,
-                             (lv_coord_t)(g_cr_buf[i] * 100));
+  float span = hi_snap - lo_snap;
+  if (span <= 0.0f) span = 1.0f;
+
+  // Progressive 1D: the X axis represents the WHOLE trading session
+  // [session_open, session_close] as a fixed window, and the line fills only
+  // the elapsed-so-far left portion (Revolut-style). We spread the chart over
+  // `total_slots` evenly across the full session, put the resampled data in
+  // the first `active_n` (= elapsed fraction) slots, and leave the rest
+  // LV_CHART_POINT_NONE so the line simply stops at "now".
+  //
+  // Every other range fills the whole width: total_slots == active_n == out_n.
+  bool   progressive = (h.range == "1d");
+  static float slot_val[CR_MAX_OUT];
+  int    total_slots, active_n;
+  time_t sess_open = 0, sess_close = 0;
+  if (progressive) {
+    sess_open  = h.session_open;
+    sess_close = h.session_close;
+    time_t first_ts = h.timestamps.empty() ? 0 : h.timestamps.front();
+    time_t last_ts  = h.timestamps.empty() ? 0 : h.timestamps.back();
+    // Fallback when the API hasn't supplied session bounds: assume a 6.5h
+    // regular session beginning at the first data point.
+    if (sess_open <= 0 || sess_close <= sess_open) {
+      sess_open  = first_ts > 0 ? first_ts : last_ts;
+      sess_close = sess_open + (time_t)23400;   // 6.5h regular US session
+    }
+    float frac = 1.0f;
+    if (sess_close > sess_open && last_ts > 0) {
+      frac = (float)(last_ts - sess_open) / (float)(sess_close - sess_open);
+    }
+    if (frac < 0.02f) frac = 0.02f;   // always show at least a sliver
+    if (frac > 1.0f)  frac = 1.0f;
+
+    total_slots = CR_MAX_OUT;
+    active_n    = (int)lroundf(frac * (total_slots - 1)) + 1;
+    if (active_n < 2)           active_n = 2;
+    if (active_n > total_slots) active_n = total_slots;
+
+    // Resample the smoothed elapsed curve (g_cr_buf[0..out_n-1]) into the
+    // first `active_n` slots by linear sampling — out_n is already dense, so
+    // a linear pass keeps the curve smooth.
+    for (int i = 0; i < active_n; ++i) {
+      float pos = (active_n > 1)
+                      ? (float)i / (float)(active_n - 1) * (float)(out_n - 1)
+                      : 0.0f;
+      int   i0  = (int)pos;
+      int   i1  = (i0 + 1 < out_n) ? i0 + 1 : i0;
+      float fr  = pos - (float)i0;
+      slot_val[i] = g_cr_buf[i0] * (1.0f - fr) + g_cr_buf[i1] * fr;
+    }
+  } else {
+    total_slots = out_n;
+    active_n    = out_n;
+    for (int i = 0; i < out_n; ++i) slot_val[i] = g_cr_buf[i];
+  }
+
+  lv_chart_set_point_count(g_chart, total_slots);
+  for (int i = 0; i < total_slots; ++i) {
+    if (i < active_n)
+      lv_chart_set_value_by_id(g_chart, g_ser, i,
+                               (lv_coord_t)(slot_val[i] * 100));
+    else
+      lv_chart_set_value_by_id(g_chart, g_ser, i, LV_CHART_POINT_NONE);
   }
 
   // Precompute pixel positions for the area-fill callback. Chart-local
   // coords — no gutter offset, since the chart obj itself is at (gutter,
-  // 0) inside the card. Every interpolated point becomes a polygon
-  // vertex (stride=1).
-  float span = hi_snap - lo_snap;
-  if (span <= 0.0f) span = 1.0f;
-  g_fill_n = out_n;
+  // 0) inside the card. Only the active (elapsed) slots become polygon
+  // vertices, so the fill stops under the line's right end.
+  g_fill_n = active_n;
   g_fill_bottom_y = plot_h;
-  for (int i = 0; i < out_n; ++i) {
-    g_fill_x[i] = (plot_w * i) / (out_n - 1);
-    float ynorm = 1.0f - (g_cr_buf[i] - lo_snap) / span;
+  for (int i = 0; i < active_n; ++i) {
+    g_fill_x[i] = (plot_w * i) / (total_slots - 1);
+    float ynorm = 1.0f - (slot_val[i] - lo_snap) / span;
     int   y     = (int)lroundf(ynorm * plot_h);
     if (y < 0)      y = 0;
     if (y > plot_h) y = plot_h;
@@ -511,56 +599,75 @@ void render_history(const History& h) {
   // Refresh the active range button's bg colour to match the up/down accent.
   apply_range_styles();
 
-  // X-axis labels — three ticks at native indices [0, n/3, 2n/3] using
-  // each point's own epoch. The format switches on the REQUESTED range
-  // (the user's mental model), NOT the API's `interval` field. For 5d
-  // the backend returns intraday-resolution data spanning 5 calendar
-  // days; the three sampled hours come from 3 different days and look
-  // random ("18:00 16:30 15:00"). Anything wider than 1d → DD MMM so
-  // the day component is actually visible. 1d → HH:MM (intraday
-  // resolution within a single trading day, gmtime; no local TZ on
-  // device).
-  bool intraday = (h.range == "1d");
-  int n_native = n;
-  int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
-  time_t now = time(nullptr);
+  // X-axis labels. The format reflects the REQUESTED range (the user's
+  // mental model), not the API's `interval` field.
+  //   1D  → three FIXED session ticks (open / mid / close) at 0/50/100 % of
+  //         the plot width, so the axis always represents the whole trading
+  //         day no matter how much has elapsed. Shown in device-local time
+  //         (TZ is configured at boot).
+  //   else → three data-driven DD MMM ticks sampled from the points. (For 5d
+  //         the backend returns intraday-resolution data spanning several
+  //         calendar days, so a day component must be visible.)
   int card_w = CHART_W;   // card content width (card width - 2*pad_all)
-  for (int k = 0; k < X_TICK_COUNT; ++k) {
-    int idx_native = x_idx[k];
-    if (idx_native >= n_native) idx_native = n_native - 1;
-    time_t t = 0;
-    if ((int)h.timestamps.size() == n_native && h.timestamps[idx_native] > 0) {
-      t = h.timestamps[idx_native];
-    } else {
-      // Fallback synthetic spacing — daily for the sparkline fallback,
-      // 1 minute for the intraday case so multiple ticks still differ.
-      time_t step_s = intraday ? (time_t)60 : (time_t)86400;
-      t = now - (time_t)(n_native - 1 - idx_native) * step_s;
-    }
-    struct tm tmv;
+  if (progressive) {
+    time_t span_s = sess_close - sess_open;
+    for (int k = 0; k < X_TICK_COUNT; ++k) {
+      time_t t = sess_open + (time_t)((long long)span_s * k / (X_TICK_COUNT - 1));
+      struct tm tmv;
 #if defined(_WIN32)
-    gmtime_s(&tmv, &t);
+      localtime_s(&tmv, &t);
 #else
-    gmtime_r(&t, &tmv);
+      localtime_r(&t, &tmv);
 #endif
-    if (intraday) {
       snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
-    } else {
-      snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
-    }
-    lv_label_set_text(g_x_labels[k], buf);
+      lv_label_set_text(g_x_labels[k], buf);
 
-    int idx_interp = idx_native * CR_FACTOR;
-    int x_px       = gutter + (plot_w * idx_interp) / (out_n - 1);
-    lv_obj_update_layout(g_x_labels[k]);
-    int lw = lv_obj_get_width (g_x_labels[k]);
-    int lh = lv_obj_get_height(g_x_labels[k]);
-    int lx = x_px - lw / 2;
-    if (lx < 0)            lx = 0;
-    if (lx + lw > card_w)  lx = card_w - lw;
-    int ly = plot_h + (pad_btm - lh) / 2;
-    if (ly < plot_h)       ly = plot_h;
-    lv_obj_set_pos(g_x_labels[k], lx, ly);
+      int x_px = gutter + (plot_w * k) / (X_TICK_COUNT - 1);
+      lv_obj_update_layout(g_x_labels[k]);
+      int lw = lv_obj_get_width (g_x_labels[k]);
+      int lh = lv_obj_get_height(g_x_labels[k]);
+      int lx = x_px - lw / 2;
+      if (lx < 0)            lx = 0;
+      if (lx + lw > card_w)  lx = card_w - lw;
+      int ly = plot_h + (pad_btm - lh) / 2;
+      if (ly < plot_h)       ly = plot_h;
+      lv_obj_set_pos(g_x_labels[k], lx, ly);
+    }
+  } else {
+    int n_native = n;
+    int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
+    time_t now = time(nullptr);
+    for (int k = 0; k < X_TICK_COUNT; ++k) {
+      int idx_native = x_idx[k];
+      if (idx_native >= n_native) idx_native = n_native - 1;
+      time_t t = 0;
+      if ((int)h.timestamps.size() == n_native && h.timestamps[idx_native] > 0) {
+        t = h.timestamps[idx_native];
+      } else {
+        // Fallback synthetic daily spacing (sparkline-fallback path has no ts).
+        t = now - (time_t)(n_native - 1 - idx_native) * (time_t)86400;
+      }
+      struct tm tmv;
+#if defined(_WIN32)
+      gmtime_s(&tmv, &t);
+#else
+      gmtime_r(&t, &tmv);
+#endif
+      snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
+      lv_label_set_text(g_x_labels[k], buf);
+
+      int idx_interp = idx_native * CR_FACTOR;
+      int x_px       = gutter + (plot_w * idx_interp) / (out_n - 1);
+      lv_obj_update_layout(g_x_labels[k]);
+      int lw = lv_obj_get_width (g_x_labels[k]);
+      int lh = lv_obj_get_height(g_x_labels[k]);
+      int lx = x_px - lw / 2;
+      if (lx < 0)            lx = 0;
+      if (lx + lw > card_w)  lx = card_w - lw;
+      int ly = plot_h + (pad_btm - lh) / 2;
+      if (ly < plot_h)       ly = plot_h;
+      lv_obj_set_pos(g_x_labels[k], lx, ly);
+    }
   }
 
   // Current-price marker (chart child). Dot only — the floating price
@@ -572,7 +679,10 @@ void render_history(const History& h) {
 
   lv_obj_update_layout(g_chart);
   lv_point_t tip;
-  lv_chart_get_point_pos_by_id(g_chart, g_ser, out_n - 1, &tip);
+  // Marker sits at the last ELAPSED point (= the line's right end). For 1D
+  // that's well left of the chart edge early in the session; for other ranges
+  // active_n == total_slots so it's the rightmost point as before.
+  lv_chart_get_point_pos_by_id(g_chart, g_ser, active_n - 1, &tip);
 
   lv_coord_t dot_x = tip.x - MARKER_DOT_SIZE / 2;
   lv_coord_t dot_y = tip.y - MARKER_DOT_SIZE / 2;
@@ -607,6 +717,7 @@ void show(QuoteStore* store, const String& symbol) {
   // default button checked; clear all other CHECKED flags first.
   g_range_idx         = kDefaultRangeIdx;
   g_pending_range_idx = kDefaultRangeIdx;
+  g_first_load        = true;   // allow the sparkline fallback to fill the blank
   apply_range_styles();
   g_active = true;
   start_history_fetch();
@@ -623,6 +734,7 @@ void tick() {
   if (g_loading && g_store->historyError()) {
     g_loading = false;
     g_pending_range_idx = g_range_idx;
+    apply_range_styles();   // move the highlight back to the still-displayed range
     if (g_spinner)   lv_obj_add_flag   (g_spinner,   LV_OBJ_FLAG_HIDDEN);
     if (g_err_label) lv_obj_remove_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     g_showed_err = true;
@@ -638,15 +750,19 @@ void tick() {
     render_history(h);
     // New data is on screen — commit the pending range as active. The
     // highlighted button now matches what the chart shows.
-    g_range_idx = g_pending_range_idx;
+    g_range_idx  = g_pending_range_idx;
     apply_range_styles();
-    g_loading  = false;
-    g_rendered = true;
+    g_loading    = false;
+    g_rendered   = true;
+    g_first_load = false;   // future switches keep blank+spinner, no flicker
     return;
   }
-  // Fall back to the daily sparkline so the user sees SOMETHING while
-  // the proper history fetch is in flight. Don't latch g_rendered so
-  // the real result still takes over when it arrives.
+  // First open only: fall back to the daily sparkline so the user sees
+  // SOMETHING while the proper history fetch is in flight. On a range switch
+  // we skip this — a clean blank + spinner is clearer than flickering the
+  // sparkline in for a moment. Don't latch g_rendered so the real result
+  // still takes over when it arrives.
+  if (!g_first_load) return;
   for (const auto& q : g_store->snapshot()) {
     if (q.symbol == g_symbol && q.sparkline.size() >= 2) {
       History fallback;

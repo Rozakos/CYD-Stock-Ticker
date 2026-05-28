@@ -128,6 +128,14 @@ void on_row_long_press(lv_event_t* e) {
   g_favourites_dirty   = true;
 }
 
+// The row's heap-allocated symbol string (shared by the click + long-press
+// callbacks) is owned by us, not LVGL. Free it when the row obj is destroyed
+// (lv_obj_clean / delete on every reorder or symbol-set change) so it doesn't
+// leak one string per row on each rebuild.
+void on_row_delete(lv_event_t* e) {
+  free(lv_event_get_user_data(e));
+}
+
 Row make_row(lv_obj_t* parent, const String& symbol) {
   Row r{};
   r.symbol = symbol;
@@ -205,6 +213,7 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   char* heapSym = strdup(symbol.c_str());
   lv_obj_add_event_cb(r.obj, on_row_click,      LV_EVENT_CLICKED,      heapSym);
   lv_obj_add_event_cb(r.obj, on_row_long_press, LV_EVENT_LONG_PRESSED, heapSym);
+  lv_obj_add_event_cb(r.obj, on_row_delete,     LV_EVENT_DELETE,       heapSym);
   return r;
 }
 

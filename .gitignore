@@ -7,3 +7,4 @@ src/secrets.h
 sim/build*/
 sim/sim_data/
 .claude/
+monitor.log

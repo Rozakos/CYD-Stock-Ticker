@@ -26,6 +26,13 @@ struct History {
   // Left empty for the daily-sparkline fallback path; the detail screen
   // synthesises one-day spacing back from "now" in that case.
   std::vector<time_t> timestamps;
+  // Regular trading-session bounds (epoch seconds, UTC) for the day the
+  // points cover. Populated only for range=="1d"; drives the progressive
+  // intraday chart, where the X axis spans the whole session and the line
+  // fills only the elapsed-so-far left portion. 0 when unknown — the detail
+  // screen then assumes a 6.5h session starting at the first point.
+  time_t              session_open  = 0;
+  time_t              session_close = 0;
 };
 
 struct HistoryRequest {

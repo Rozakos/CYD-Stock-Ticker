@@ -182,10 +182,18 @@ void loop() {
   if (g_dns) g_dns->processNextRequest();
   if (g_pendingReconnect && g_settings) {
     g_pendingReconnect = false;
-    SettingsStore* s = g_settings;
+    SettingsStore* s = g_settings;   // end() clears g_settings — capture first
     log_i("[portal] reconnect requested");
     end();                       // tear down portal before mode switch
-    wifi_mgr::retrySta(*s);      // may bring AP back up on failure
+    wifi_mgr::retrySta(*s);      // blocks ~15s; brings AP back up on failure
+    // If the new credentials didn't take, retrySta has re-started the setup
+    // AP but NOT the DNS/web server we just tore down. Re-arm the portal so
+    // the user can actually load the page and try again (previously this was
+    // skipped, leaving a dead AP and a frozen setup screen).
+    if (!wifi_mgr::connected() && wifi_mgr::apActive()) {
+      log_w("[portal] reconnect failed — re-arming setup portal");
+      begin(*s);
+    }
   }
 }
 
