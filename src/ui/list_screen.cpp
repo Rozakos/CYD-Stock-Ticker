@@ -346,9 +346,8 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
 
 void refresh_wifi() {
   if (WiFi.status() == WL_CONNECTED) {
-    char buf[24];
-    snprintf(buf, sizeof(buf), LV_SYMBOL_WIFI " %ld", (long)WiFi.RSSI());
-    lv_label_set_text(g_wifi_icon, buf);
+    // Just the signal glyph when connected — the dBm number was noise.
+    lv_label_set_text(g_wifi_icon, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_color(g_wifi_icon, styles::up_color(), 0);
   } else {
     lv_label_set_text(g_wifi_icon, LV_SYMBOL_CLOSE " no link");

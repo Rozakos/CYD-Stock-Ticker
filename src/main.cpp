@@ -78,9 +78,13 @@ void netTask(void*) {
   bool sta_services_up = false;
   auto bringUpStaServices = [&] {
     if (sta_services_up) return;
+    // NTP first — configTime() sets the clock to UTC and resets TZ to UTC
+    // internally, so our local TZ must be applied AFTER it. (Doing it before
+    // was clobbered, leaving localtime_r on UTC — the 1D axis showed 13:30
+    // instead of 16:30 EET.)
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     setenv("TZ", cfg::TIME_TZ, 1);
     tzset();
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     web_admin::begin(&g_settings);
     xSemaphoreTake(g_lvglMu, portMAX_DELAY);
     lv_screen_load(list_screen::screen());

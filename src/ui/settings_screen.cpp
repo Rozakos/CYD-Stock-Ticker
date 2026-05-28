@@ -23,7 +23,7 @@ lv_obj_t* g_syms    = nullptr;
 lv_obj_t* g_key     = nullptr;
 lv_obj_t* g_url     = nullptr;
 
-void on_tap(lv_event_t*) {
+void on_back(lv_event_t*) {
   g_active = false;
   lv_screen_load(list_screen::screen());
 }
@@ -64,8 +64,8 @@ void build_once() {
   lv_obj_set_flex_flow(g_scr, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(g_scr, 6, 0);
   lv_obj_clear_flag(g_scr, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(g_scr, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(g_scr, on_tap, LV_EVENT_CLICKED, nullptr);
+  // No whole-screen tap-to-return — use the explicit back button below, the
+  // same as the stock detail screen.
 
   // Header
   lv_obj_t* header = lv_obj_create(g_scr);
@@ -81,9 +81,19 @@ void build_once() {
   lv_obj_add_style(title, &styles::sym_small, 0);
   lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Settings");
 
-  lv_obj_t* back = lv_label_create(header);
-  lv_obj_add_style(back, &styles::muted, 0);
-  lv_label_set_text(back, LV_SYMBOL_LEFT " tap");
+  // Real tappable back button (top-right), matching the detail screen.
+  lv_obj_t* back = lv_button_create(header);
+  lv_obj_remove_style_all(back);
+  lv_obj_set_size(back, 34, 22);
+  lv_obj_set_style_radius(back, 6, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(back, lv_color_hex(0x2a3548), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(back, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_ext_click_area(back, 10);
+  lv_obj_add_event_cb(back, on_back, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* back_lbl = lv_label_create(back);
+  lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(back_lbl, lv_color_hex(0xe7eef7), LV_PART_MAIN);
+  lv_obj_center(back_lbl);
 
   // Network card
   lv_obj_t* net = lv_obj_create(g_scr);

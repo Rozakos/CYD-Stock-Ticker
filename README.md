@@ -6,15 +6,16 @@ Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-archite
 
 - **Stack**: PlatformIO + Arduino-ESP32, LovyanGFX, LVGL 9.x, ArduinoJson v7, ESPAsyncWebServer.
 - **Tasks**: LVGL UI pinned to core 1, networking (WiFi + HTTPS + web admin) on core 0. UI never blocks on the network.
-- **Display**: ST7789 240×320, landscape (320×240), display inversion ON. Touch via XPT2046 on a separate SPI bus. Targets the dual-USB (USB-C + micro-USB) ESP32-2432S028R revision; the original single-micro-USB rev ships with an ILI9341 — see `src/display/lgfx_cyd.hpp` if you're on that one.
+- **Display**: ST7789 240×320, landscape (320×240), display inversion OFF (`invert = false`). Touch via XPT2046 on a separate SPI bus. Targets the dual-USB (USB-C + micro-USB) ESP32-2432S028R revision; the original single-micro-USB rev ships with an ILI9341 — see `src/display/lgfx_cyd.hpp` if you're on that one.
 - **Data source**: self-hosted yfinance proxy at `https://rozakos.eu/stocks/api/v1` (bearer-token auth). Repo: [Rozakos/stock-api](https://github.com/Rozakos/stock-api).
 
 ## UI tour
 
 - **List screen** — one row per symbol with the company logo (or a brand-colored letter badge), a 10-point sparkline, current price, and percent change with a colored up/down arrow. Auto-scrolls every 4 s when the list overflows.
-- **Detail screen** — tap any row. 48 px logo, large price, percent change, area-filled trend chart (last 30 daily closes by default), plus LOW / RANGE / HIGH stats. Tap anywhere to go back.
-- **Status bar** — wifi indicator (green + RSSI dBm when connected, red "no link" otherwise), section title, last-update timestamp, and a gear icon on the right that opens the settings info screen.
-- **Settings info screen** — tap the gear. Read-only view of network state (SSID, IP, signal), refresh interval, symbols, and API-key status, plus the `http://<ip>/` URL to open the editable web admin. Tap anywhere to go back.
+- **Detail screen** — tap any row. 48 px logo, large price, percent change, and an area-filled trend chart with Y-axis price ticks, X-axis time/date ticks, and a current-price marker dot. A range selector (1D / 1W / 1M / 6M / 1Y / 5Y / Max) sits above the chart; **1D is the default and renders progressively** — the X axis spans the whole trading session and the line fills only the elapsed part of the day (Revolut-style). A **back button** at the top-right returns to the list; tapping the chart does nothing.
+- **Status bar** — wifi indicator (green glyph when connected, red "no link" otherwise; tap it to forget the network and reboot into WiFi setup), section title, last-update timestamp, and a gear icon on the right that opens the settings screen.
+- **Settings screen** — tap the gear. Read-only view of network state (SSID, IP, signal), refresh interval, symbols, and API-key status, plus the `http://<ip>/` URL to open the editable web admin. A **back button** at the top-right returns to the list.
+- **WiFi setup screen** — shown on first boot (or when no saved network connects): a QR code to join the device's setup AP plus a captive-portal page to enter credentials. Live status (Connecting… / Connected / failure reason) is shown on-device so no serial console is needed.
 
 ## Build & flash
 
@@ -78,14 +79,22 @@ still looks coherent without code changes.
 
 ## Logos
 
-The list and detail screens try to load `L:/logos/<SYMBOL>.png` from LittleFS
-(LVGL FS driver registered in `src/display/fs_littlefs.cpp`, decoded via
-`LV_USE_LODEPNG`). When a PNG is missing the widget draws a circular badge in
-the symbol's brand color with the first 1-2 letters.
+A few common symbols (AMD, MSFT, NVDA) are compiled in as ARGB8888 arrays.
+For everything else the firmware fetches `GET /logo/{symbol}?size=48` on
+demand, caches the PNG in LittleFS (`/logos/<SYMBOL>.png`), and decodes it to
+an in-memory ARGB8888 image with pngle — the same render path the embedded
+logos use (LVGL's file-backed PNG path mis-draws on this panel). When no logo
+is available the widget draws a circular badge in the symbol's brand color
+with the first 1-2 letters.
 
-Place PNGs in `data/logos/` (uppercase filename, e.g. `AAPL.png`).
-Recommended size: 48×48 or 64×64, transparent background, < ~4 KB each.
-Upload with `pio run -t uploadfs`.
+Downloads are hardened: a logo is cached only if the PNG is complete (ends with
+the `IEND` marker), so a truncated transfer can't wedge a symbol on a black
+icon; an incomplete or wrong-size cache file is re-fetched, and a cached file
+that fails to decode is deleted so the next refresh re-downloads it. Missing
+logos retry every refresh cycle.
+
+You can also pre-seed logos by dropping PNGs in `data/logos/` (uppercase
+filename, e.g. `AAPL.png`, 48×48 transparent) and running `pio run -t uploadfs`.
 
 ## stock-api endpoints
 
@@ -97,20 +106,22 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
   `last` and `change_pct` plus a `closes[]` array (up to 5 daily closes,
   oldest→newest) used directly for the row sparkline. Server-side cached
   10 min.
-- **Detail**: `GET /history/{symbol}?days=2` for the trend chart. Returns
-  minute-resolution `points[].last`; the firmware keeps the last
-  `HISTORY_POINTS` of them. We request 2 days (not 1) so the chart isn't
-  empty on weekends / outside US regular trading hours, when "today" has
-  no minute bars yet. Requires the server to have Postgres history
-  enabled (`DATABASE_URL`); otherwise the server returns 503.
+- **Detail**: `GET /history/{symbol}?range=<range>&limit=<n>` for the trend
+  chart. `range` ∈ {`1d`, `1w`, `1mo`, `6mo`, `1y`, `5y`, `max`}. Response
+  carries `interval` (`intraday`|`daily`) and `points[]` of `{ts, last}`
+  (epoch seconds UTC); the firmware downsamples to `HISTORY_POINTS`,
+  preserving the first/last point so the displayed % change matches the
+  window. For `range=1d` the response should also include
+  `session_open`/`session_close` (epoch s) so the chart spans the full
+  trading session; without them the firmware assumes a 6.5 h session. The
+  server must apply `limit` for **all** ranges (notably `max`) so the payload
+  stays small enough for the ESP32 to parse. Requires server Postgres history
+  (`DATABASE_URL`); otherwise 503.
 
 The HTTP client uses `useHTTP10(true)` + `Accept-Encoding: identity` to
 avoid chunked transfer and gzip — workarounds carried over from the
 previous backend. JSON parsing uses an ArduinoJson `Filter` so the
 streamed body never lands fully in RAM.
-
-To request a longer detail window, change `days=1` to `days=N` (1–30) in
-`src/net/quote_fetcher.cpp::fetchHistory`.
 
 ## Hardware pinout (already wired in firmware)
 
@@ -136,16 +147,19 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
   is in effect and the build didn't run out of IRAM. Lower the SPI clock in
   `src/display/lgfx_cyd.hpp` from `40000000` to `27000000` if you see tearing.
 - **Screen is scrambled / "noise" / wrong colors**: you likely have the
-  wrong panel driver for your CYD revision. The dual-USB board uses ST7789
-  with `invert = true`; the original single-micro-USB uses `Panel_ILI9341`
-  with `invert = false`. Swap the class and the `invert` flag in
+  wrong panel driver/inversion for your CYD revision. This dual-USB board uses
+  ST7789 with `invert = false` (setting `invert = true` tints green→pink and
+  red→cyan); the original single-micro-USB uses `Panel_ILI9341`. Swap the
+  class and the `invert` flag in
   `src/display/lgfx_cyd.hpp`. Also confirm `flush_cb` in
   `src/display/lvgl_bridge.cpp` is calling `writePixels(..., true)` — the
   third arg byte-swaps RGB565 for MSB-first SPI panels (needed when
   `LV_COLOR_16_SWAP = 0` in `include/lv_conf.h`).
-- **Touch off-center / mirrored**: tweak `x_min/x_max/y_min/y_max` in
-  `lgfx_cyd.hpp` (swap min/max to invert an axis), or change touch
-  `offset_rotation` to align with the LCD rotation.
+- **Touch off-center / mirrored**: this panel runs landscape
+  (`setRotation(1)`) while the touch stays `offset_rotation=0`, so the touch's
+  raw axes are rotated 90° vs the screen — `cfg.x_min/x_max` controls
+  screen-**vertical** and `cfg.y_min/y_max` controls screen-**horizontal**. To
+  flip left/right reverse the Y ends; to flip up/down reverse the X ends.
 - **HTTP errors**: check serial for `HTTP <code> <url>`.
 
   | Code | Meaning |
