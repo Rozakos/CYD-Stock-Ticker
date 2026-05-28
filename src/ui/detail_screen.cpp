@@ -37,7 +37,7 @@ static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 // button is `g_range_labels[]`; the value sent in `?range=` is
 // `g_range_api[]`. Keep both arrays in lock-step.
 static constexpr int kNumRanges       = 7;
-static constexpr int kDefaultRangeIdx = 2;     // "1M"
+static constexpr int kDefaultRangeIdx = 0;     // "1D"
 static const char* g_range_labels[] = {
     "1D", "1W", "1M", "6M", "1Y", "5Y", "Max"
 };
@@ -763,6 +763,10 @@ void tick() {
   // sparkline in for a moment. Don't latch g_rendered so the real result
   // still takes over when it arrives.
   if (!g_first_load) return;
+  // The fallback is a DAILY sparkline. For the 1D intraday view it would flash
+  // a day-scale curve that doesn't match the real intraday shape before the
+  // API call lands — show the spinner alone for 1D instead.
+  if (String(g_range_api[g_pending_range_idx]) == "1d") return;
   for (const auto& q : g_store->snapshot()) {
     if (q.symbol == g_symbol && q.sparkline.size() >= 2) {
       History fallback;

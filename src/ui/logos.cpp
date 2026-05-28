@@ -568,8 +568,15 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
     bool hadDecoder = (g_pngle != nullptr);
     RuntimeLogo* rt = cachedRuntimeLogo(up, path, bytes);
     if (!rt) {
-      log_w("[logo] %s runtime decode failed %s bytes=%u",
+      log_w("[logo] %s runtime decode failed %s bytes=%u — dropping cache to re-fetch",
             up.c_str(), path.c_str(), (unsigned)bytes);
+      // The cached PNG is unusable (corrupt / truncated / undecodable). Delete
+      // it so the next quote refresh re-downloads a fresh copy instead of this
+      // file wedging the symbol on the badge fallback forever.
+      {
+        fs_littlefs::Guard g;
+        LittleFS.remove(path);
+      }
       if (!hadDecoder) releaseRuntimeDecoder();
       return makeBadge(parent, symbol, size);
     }

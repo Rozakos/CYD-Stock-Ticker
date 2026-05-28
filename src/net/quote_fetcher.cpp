@@ -93,6 +93,32 @@ bool logoDims(const String& path, uint32_t& w, uint32_t& h) {
   return true;
 }
 
+// A complete PNG ends with the IEND chunk (type+CRC are constant:
+// 49 45 4E 44 AE 42 60 82). Checking for it catches downloads that were
+// truncated mid-transfer but still start with a valid signature/IHDR — those
+// otherwise pass the dims check, get cached, and decode to a black/garbage
+// blob that never gets re-fetched.
+const uint8_t kPngIend[8] = {0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82};
+
+bool bytesComplete(const uint8_t* d, size_t n) {
+  if (n < 16) return false;
+  return memcmp(d + n - 8, kPngIend, 8) == 0;
+}
+
+// Same check against a cached file — reads only the trailing 8 bytes.
+bool logoFileComplete(const String& path) {
+  fs_littlefs::Guard g;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  size_t sz = f.size();
+  if (sz < 16) { f.close(); return false; }
+  f.seek(sz - 8);
+  uint8_t tail[8];
+  size_t got = f.readBytes(reinterpret_cast<char*>(tail), sizeof(tail));
+  f.close();
+  return got == sizeof(tail) && memcmp(tail, kPngIend, 8) == 0;
+}
+
 bool fetchLogo(const String& symbol, const String& token) {
   // Embedded ARGB8888 logos in `logos_data` bypass the runtime PNG path
   // entirely; nothing to do at the fetch layer.
@@ -107,9 +133,12 @@ bool fetchLogo(const String& symbol, const String& token) {
   // we don't want a cached file masking the rendering pipeline.
   if (!cfg::LOGO_TEST_MODE && logoExists(path)) {
     uint32_t cw = 0, ch = 0;
-    if (logoDims(path, cw, ch) && cw == 48 && ch == 48) return true;
-    log_i("[logo] %s cache stale dims=%ux%u, refetching",
-          symbol.c_str(), (unsigned)cw, (unsigned)ch);
+    bool dimsOk = logoDims(path, cw, ch) && cw == 48 && ch == 48;
+    if (dimsOk && logoFileComplete(path)) return true;
+    // Wrong size (older build) OR truncated/corrupt (no IEND) — drop it and
+    // re-download so a bad cache can't wedge a symbol on a black icon.
+    log_i("[logo] %s cache invalid dims=%ux%u complete=%d, refetching",
+          symbol.c_str(), (unsigned)cw, (unsigned)ch, (int)logoFileComplete(path));
   }
 
   // Request 48x48 PNGs so lodepng's transient decode peak stays under
@@ -189,6 +218,14 @@ bool fetchLogo(const String& symbol, const String& token) {
         s[4] == '\r' && s[5] == '\n' && s[6] == 0x1a && s[7] == '\n')) {
     log_w("[logo] %s not a PNG (sig=%02X %02X %02X %02X)",
           symbol.c_str(), s[0], s[1], s[2], s[3]);
+    return false;
+  }
+  // Reject a truncated transfer (valid header but no IEND) rather than caching
+  // a partial file that would render black. Returning false leaves no cache
+  // file, so the next refresh retries the download.
+  if (!bytesComplete(body.data(), body.size())) {
+    log_w("[logo] %s incomplete PNG (no IEND, %u bytes) — not caching, will retry",
+          symbol.c_str(), (unsigned)body.size());
     return false;
   }
 
