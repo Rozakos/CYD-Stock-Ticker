@@ -141,6 +141,18 @@ bool fetchLogo(const String& symbol, const String& token) {
           symbol.c_str(), (unsigned)cw, (unsigned)ch, (int)logoFileComplete(path));
   }
 
+  // A logo download needs a TLS session (~40 KB, contiguous) plus an 8 KB
+  // body buffer. If heap is tight (many resident logos + WiFi/TLS), attempting
+  // it risks an allocation abort that reboots the device. Skip this cycle when
+  // the largest free block is too small — the badge shows until heap recovers,
+  // and quote fetches (more important) keep what headroom remains.
+  if (ESP.getMaxAllocHeap() < 45000) {
+    log_w("[logo] %s skip download (low heap: free=%u maxblk=%u)",
+          symbol.c_str(), (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
+    return false;
+  }
+
   // Request 48x48 PNGs so lodepng's transient decode peak stays under
   // the ~40 KB largest-contiguous heap ceiling we see after WiFi+TLS.
   // The cache slot then mounts at native 48x48 and LVGL bilinearly

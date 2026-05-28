@@ -15,6 +15,12 @@
 namespace {
 
 constexpr size_t MAX_RUNTIME_PNG_BYTES = 64 * 1024;
+// Each cached runtime logo holds a decoded 48×48 ARGB8888 bitmap (~9 KB) in
+// heap for its whole lifetime. Too many at once (plus WiFi + a ~40 KB TLS
+// session per fetch) exhausts the heap and aborts the firmware. Cap how many
+// we keep resident; symbols past the cap fall back to the letter badge (which
+// costs no heap). Embedded logos live in flash and don't count against this.
+constexpr size_t MAX_RUNTIME_LOGOS = 6;
 constexpr unsigned MAX_RUNTIME_LOGO_SIDE = 128;
 // Matches the size the API serves now (see fetcher's ?size=48). Caching
 // at the source resolution means the pngle callback writes pixels 1:1
@@ -486,6 +492,14 @@ RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
     }
   }
 
+  // Cap resident logos to bound heap use. Past the cap, return null so the
+  // caller draws a (heap-free) badge instead of decoding another ~9 KB bitmap.
+  if (g_runtime_cache.size() >= MAX_RUNTIME_LOGOS) {
+    log_w("[logo] %s runtime cache full (%u) — badge fallback to cap RAM",
+          symbol.c_str(), (unsigned)g_runtime_cache.size());
+    return nullptr;
+  }
+
   RuntimeLogo* logo =
       decodeRuntimeLogo(symbol, path, RUNTIME_LOGO_CACHE_SIDE, &bytes);
   if (!logo) return nullptr;
@@ -568,15 +582,14 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
     bool hadDecoder = (g_pngle != nullptr);
     RuntimeLogo* rt = cachedRuntimeLogo(up, path, bytes);
     if (!rt) {
-      log_w("[logo] %s runtime decode failed %s bytes=%u — dropping cache to re-fetch",
+      // Decode/cache-cap miss. Most often this is transient low heap (cache
+      // full or OOM), NOT a bad file — the download path already validates PNG
+      // completeness. Do NOT delete the cached file here: deleting forces a
+      // wasteful re-download (~40 KB TLS) that worsens the memory pressure and
+      // spirals into reboots. Just show the badge; the real logo mounts on a
+      // later refresh once heap frees up.
+      log_w("[logo] %s runtime decode/cap miss %s bytes=%u — badge fallback",
             up.c_str(), path.c_str(), (unsigned)bytes);
-      // The cached PNG is unusable (corrupt / truncated / undecodable). Delete
-      // it so the next quote refresh re-downloads a fresh copy instead of this
-      // file wedging the symbol on the badge fallback forever.
-      {
-        fs_littlefs::Guard g;
-        LittleFS.remove(path);
-      }
       if (!hadDecoder) releaseRuntimeDecoder();
       return makeBadge(parent, symbol, size);
     }
