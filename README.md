@@ -89,9 +89,16 @@ with the first 1-2 letters.
 
 Downloads are hardened: a logo is cached only if the PNG is complete (ends with
 the `IEND` marker), so a truncated transfer can't wedge a symbol on a black
-icon; an incomplete or wrong-size cache file is re-fetched, and a cached file
-that fails to decode is deleted so the next refresh re-downloads it. Missing
-logos retry every refresh cycle.
+icon, and an incomplete or wrong-size cache file is re-fetched. Missing logos
+retry every refresh cycle.
+
+Each runtime logo is held decoded in RAM (~9 KB at 48×48 ARGB), so to avoid
+heap exhaustion (and the reboots it caused) the firmware caps resident runtime
+logos at `MAX_RUNTIME_LOGOS` (6) and skips a logo download when the largest
+free heap block is too small. Symbols past the cap show a letter badge (which
+costs no heap). For symbols you always want a real logo for, embed them at
+compile time (see below) — embedded logos live in flash and don't count against
+the RAM cap.
 
 You can also pre-seed logos by dropping PNGs in `data/logos/` (uppercase
 filename, e.g. `AAPL.png`, 48×48 transparent) and running `pio run -t uploadfs`.

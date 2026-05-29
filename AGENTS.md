@@ -33,6 +33,19 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
   0xFFFF — producing complement colors (green → pink, red → cyan). Do NOT
   set `invert = true` even if it seems like it might be needed; it will
   silently invert every color channel. See `src/display/lgfx_cyd.hpp`.
+- **Touch axis mapping is rotation-coupled.** The panel runs landscape
+  (`setRotation(1)`) while the touch stays `offset_rotation=0`, so the touch's
+  raw axes are rotated 90° vs the screen: `cfg.x_min/x_max` controls
+  screen-**VERTICAL**, `cfg.y_min/y_max` controls screen-**HORIZONTAL**.
+  Correct values: `x_min=3900, x_max=300` (vertical) and `y_min=200,
+  y_max=3850` (horizontal). Touch is NOT mirrored — do **not** re-add the old
+  per-widget left/right index reversal (the range-button `#if !SIM_BUILD` hack
+  was removed). To flip an axis, reverse that axis's min/max ends.
+- **TZ must be applied AFTER `configTime`.** `configTime(0,0,ntp…)` resets
+  `TZ` to UTC internally, so set the local zone
+  (`setenv("TZ", cfg::TIME_TZ); tzset()`) *after* it, or `localtime_r` returns
+  UTC (the 1D axis showed 13:30 instead of 16:30 EET). See
+  `main.cpp::bringUpStaServices`.
 - **Two FreeRTOS tasks**, pinned: `uiTask` on core 1 (LVGL), `netTask` on
   core 0 (WiFi + HTTPS + web admin). They share `QuoteStore` and
   `SettingsStore` under a mutex. LVGL itself is single-threaded behind
@@ -51,8 +64,8 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 36.1%**, **Flash 83.1%**. DRAM is the constraint when
-adding LVGL features. Two main levers:
+Last clean build: **RAM 36.2%**, **Flash 82.3%**. Static DRAM is the link-time
+constraint; runtime **heap** is the bigger operational constraint. Levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
   height. Currently 16 (two buffers of 320×16×2 = ~20 KB total).
@@ -62,6 +75,15 @@ If a future change overflows DRAM (link error
 `region 'dram0_0_seg' overflowed`), drop `LINES` or `LV_MEM_SIZE` before
 adding bigger fonts. Fonts go in flash, not DRAM — adding a Montserrat size
 costs flash, not DRAM.
+
+**Runtime heap is what bites with many symbols.** Each runtime logo holds a
+decoded ~9 KB ARGB bitmap for its lifetime, and a TLS fetch needs ~40 KB
+contiguous. Too many logos starved the heap and aborted the firmware
+(`std::vector::reserve` / `SSL - Memory allocation failed`). Guards now in
+place: resident runtime logos are capped (`MAX_RUNTIME_LOGOS=6` in
+`logos.cpp`); a logo download is skipped when `ESP.getMaxAllocHeap() < 45 KB`;
+and a decode failure does **not** delete the cache file (deleting forced a
+re-download spiral). Don't undo these without a heap budget in hand.
 
 ## Source layout
 
@@ -117,6 +139,19 @@ src/
   100`. Pending request flows UI -> store -> net via `requestHistory` /
   `takePendingHistory`; `History::range` must match the pending tab before
   the UI renders it.
+  - **Default tab is 1D**, and it renders *progressively* (Revolut-style): the
+    X axis spans the whole trading session and the line fills only the
+    elapsed-so-far left portion (trailing slots = `LV_CHART_POINT_NONE`). For
+    `range=1d` the API also returns `session_open`/`session_close` (epoch s);
+    absent them the firmware assumes a 6.5 h session. `&limit=N` is sent on
+    every range and the server MUST honor it for `max` or the oversized payload
+    OOMs the on-device JSON parse.
+  - **X-axis label format scales with span**: 1D → `HH:MM` fixed session ticks
+    (local time); <1y → `DD MMM`; 1–2y → `MMM YY`; >2y (5Y/Max) → year. Ticks
+    sit at the first / middle / **last** point.
+  - **Navigation**: the detail and settings screens use an explicit top-right
+    back button (`LV_SYMBOL_LEFT`) — there is no tap-anywhere-to-return, so
+    tapping the chart doesn't navigate.
 - **Logos**: `logos::make(parent, sym, size)` first looks up an embedded
   ARGB8888 `lv_image_dsc_t` via `logos_data::find(symbol)`
   (`src/ui/logos_data.{cpp,h}`, generated from `sim/logo_src/*.png` by
@@ -139,10 +174,17 @@ src/
     `uploadfs` time, leaving little room for runtime-fetched logos. The
     source PNGs that drive `build_logo_arrays.py` deliberately live in
     `sim/logo_src/` (NOT `data/logos/`) for this reason.
-  - **Embedded logo set is intentionally tiny.** Keep only AMD, MSFT, and
-    NVDA embedded unless there is a strong reason to add another symbol.
-    Runtime logos come from the API. The full 30-logo embedded table pushed
-    firmware flash to ~97%; the tiny set keeps flash around ~83%.
+  - **Embedded logo set is intentionally tiny — only AMD.** MSFT and NVDA were
+    dropped (their `sim/logo_src/*.png` deleted too) so only AMD compiles into
+    flash; everything else comes from the API at runtime. The full 30-logo
+    embedded table once pushed flash to ~97%; AMD-only keeps it ~82%. Embedded
+    logos live in flash (zero heap) and don't count against the runtime RAM cap
+    (`MAX_RUNTIME_LOGOS`), so embed a symbol only when you need it visible
+    regardless of that cap.
+  - **Runtime logos are capped + heap-guarded** (see Memory budget). Past the
+    cap, or when heap is tight, `logos::make` returns the letter badge; a decode
+    failure does NOT delete the cache file. Downloads are validated for PNG
+    completeness (`IEND`) before caching.
 - **Settings screen**: read-only. Editing happens in the web admin (no
   on-device keyboard). The screen pulls live WiFi info each tick and
   exposes the `http://<ip>/` URL so the user knows where to go.
@@ -234,6 +276,33 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Stabilization pass: touch, progressive 1D, heap-crash fix** (2026-05-29):
+  - **Touch un-mirrored at the source.** Screen-horizontal was mirrored (gear
+    opened WiFi reset; modal Cancel hit Reset → reboot into setup). Root cause
+    is the rotation-coupled axes (see invariants). Fixed by reversing the **Y**
+    calibration (`y_min=200, y_max=3850`), and the range-button
+    `#if !SIM_BUILD` index reversal was removed. A temporary on-screen
+    coordinate readout (on `lv_layer_top`) confirmed gear≈292,14 / wifi≈19,17.
+  - **Detail defaults to 1D and renders progressively** against API
+    `session_open`/`session_close` (6.5 h fallback). Range-switch UX: instant
+    button highlight + prominent spinner on a cleared chart; the daily
+    sparkline preview is suppressed for 1D (it misrepresents intraday).
+  - **Local-time fix**: TZ now applied *after* `configTime` (see invariants),
+    so the 1D axis and status clock show EET.
+  - **X-axis labels scale** with span (HH:MM / DD MMM / MMM YY / year) and the
+    last point (today / current year) is labelled.
+  - **Heap-exhaustion reboots fixed** (see Memory budget): `MAX_RUNTIME_LOGOS`
+    cap + pre-fetch heap guard + removal of the self-heal cache delete; logo
+    downloads validate PNG completeness (`IEND`).
+  - **Only AMD embedded** (MSFT/NVDA dropped, flash 83%→82%).
+  - **WiFi setup feedback**: `wifi_mgr::staStatus()` →
+    Connecting/Connected/Failed on the setup screen; the captive portal now
+    re-arms after a failed attempt (previously left a dead AP + frozen screen).
+  - Settings screen got a real top-right back button; status-bar WiFi shows
+    just the glyph (dropped RSSI dBm); per-row `heapSym` freed on row delete.
+  - **API contract verified live**: `range=1d` returns session bounds;
+    `range=max` honors `limit` (≤30 points). Device already consumed both.
 
 - **Runtime logos match embedded quality via API `?size=48`**
   (2026-05-20): runtime logos looked visibly pixelated next to
@@ -438,7 +507,10 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
   The portal now scans once before `server.begin()` and logs AP/STA
   transitions, captive probes, `/`, `/save`, and reconnect attempts.
 - **Touch restore + range tap fix + local time + NOK/TTWO logos** (2026-05,
-  Codex): reverted the CYD touch calibration to the known-working mirrored
+  Codex): **[SUPERSEDED 2026-05-29 — see top entry: Y is reversed not X, the
+  range-button reversal is gone, TZ is set AFTER NTP, ranges are now
+  1D/1W/1M/6M/1Y/5Y/Max default 1D, and only AMD is embedded.]** reverted the
+  CYD touch calibration to the known-working mirrored
   X/Y values (`x_min=3900`, `x_max=300`, `y_min=3850`, `y_max=200`) after a
   normal-X experiment broke device touch. The detail range row remains
   `1D / 5D / 1W / 1M / 6M` with 1M default; firmware reverses only the
@@ -704,7 +776,11 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 - Switch to hourly bars (`interval=1h`) on a long-press of the chart.
 - Per-symbol price-alert thresholds in the settings form.
 - Greek month abbreviations: need Montserrat 12/14 rebuilt with Greek Unicode
-  range (U+0370–U+03FF) via the LVGL font converter. Flash at 94% — tight.
+  range (U+0370–U+03FF) via the LVGL font converter. Flash ~82% now, so there's
+  some room, but new fonts are the biggest flash cost.
+- LRU eviction of `/logos/<SYM>.png` for symbols no longer in the list (the
+  128 KB LittleFS partition never reclaims old logos; a fs-full write guard
+  prevents crashes but new logos silently stop caching once it fills).
 
 Don't pre-build any of these unless asked — list them so the next session
 has a head start.
