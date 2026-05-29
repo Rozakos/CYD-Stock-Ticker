@@ -637,6 +637,17 @@ void render_history(const History& h) {
     int n_native = n;
     int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
     time_t now = time(nullptr);
+    // Pick the tick format from how much wall-time the window covers. "DD MMM"
+    // is meaningless once the window spans years (5Y / Max show points decades
+    // apart) — switch to the year alone there; medium windows show month+year;
+    // short windows keep day+month.
+    long span_days = 0;
+    if (h.timestamps.size() >= 2 && h.timestamps.front() > 0 &&
+        h.timestamps.back() > h.timestamps.front()) {
+      span_days = (long)((h.timestamps.back() - h.timestamps.front()) / 86400);
+    }
+    enum { FMT_DAY_MON, FMT_MON_YEAR, FMT_YEAR } xfmt =
+        span_days > 730 ? FMT_YEAR : (span_days > 365 ? FMT_MON_YEAR : FMT_DAY_MON);
     for (int k = 0; k < X_TICK_COUNT; ++k) {
       int idx_native = x_idx[k];
       if (idx_native >= n_native) idx_native = n_native - 1;
@@ -653,7 +664,14 @@ void render_history(const History& h) {
 #else
       gmtime_r(&t, &tmv);
 #endif
-      snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
+      if (xfmt == FMT_YEAR) {
+        snprintf(buf, sizeof(buf), "%d", tmv.tm_year + 1900);
+      } else if (xfmt == FMT_MON_YEAR) {
+        snprintf(buf, sizeof(buf), "%s %02d", kMonths[tmv.tm_mon],
+                 (tmv.tm_year + 1900) % 100);
+      } else {
+        snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
+      }
       lv_label_set_text(g_x_labels[k], buf);
 
       int idx_interp = idx_native * CR_FACTOR;
