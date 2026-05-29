@@ -635,7 +635,10 @@ void render_history(const History& h) {
     }
   } else {
     int n_native = n;
-    int x_idx[X_TICK_COUNT] = { 0, n_native / 3, (2 * n_native) / 3 };
+    // First / middle / LAST point. Sampling {0, n/3, 2n/3} left the most
+    // recent date (the right edge) unlabelled — so 1W never showed today and
+    // 5Y/Max never showed the current year. Anchor the last tick to n-1.
+    int x_idx[X_TICK_COUNT] = { 0, (n_native - 1) / 2, n_native - 1 };
     time_t now = time(nullptr);
     // Pick the tick format from how much wall-time the window covers. "DD MMM"
     // is meaningless once the window spans years (5Y / Max show points decades
