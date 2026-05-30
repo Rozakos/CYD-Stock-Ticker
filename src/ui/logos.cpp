@@ -28,6 +28,76 @@ constexpr unsigned MAX_RUNTIME_LOGO_SIDE = 128;
 // same path the embedded logos take. No homebrew downscale.
 constexpr uint32_t RUNTIME_LOGO_CACHE_SIDE = 48;
 
+// Logo source-kind signatures (high byte = kind, low 24 bits = payload).
+// Shared by make()'s mounted-signature out-param and signature()'s probe so
+// list_screen can tell when the *actually mounted* logo differs from what is
+// now available (e.g. a badge is up but the PNG has since become decodable)
+// and rebuild the widget.
+constexpr uint32_t SIG_EMBEDDED = 0x01000000u;
+constexpr uint32_t SIG_RUNTIME  = 0x02000000u;   // | (file bytes & 0xFFFFFF)
+constexpr uint32_t SIG_BADGE    = 0x03000000u;
+
+// A runtime PNG decode transiently needs pngle's ~32 KB inflate window plus a
+// ~9 KB pixel buffer. Running it while a TLS fetch on the net task holds its
+// ~40 KB session can drive the largest contiguous block toward zero, which
+// both fails the decode AND (worse) starves LVGL's draw pool mid-redraw.
+// Skip the decode unless there is comfortable contiguous headroom; the badge
+// shows meanwhile and rebuild_logo retries on the next refresh once the block
+// recovers — so a newly added stock no longer needs a reboot to get its icon.
+constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 48 * 1024;
+
+bool runtimeDecodeAffordable() {
+  return ESP.getMaxAllocHeap() >= RUNTIME_DECODE_MIN_MAXALLOC;
+}
+
+// Some brand marks (e.g. MU) are a near-black glyph on a transparent
+// background, so they vanish against the dark UI. Sample the ARGB8888 bitmap
+// and report whether the *opaque* pixels are essentially black: both very dark
+// AND neutral (no real hue). The neutrality test is what keeps dark-but-
+// coloured marks that read fine on the dark UI — ASML's blue, a navy, a dark
+// green — from getting an unwanted plate; only true black/greyscale qualifies.
+// Data is LVGL ARGB8888 == little-endian B,G,R,A (see pngDrawCb). Sampled on a
+// coarse grid to stay cheap.
+bool logoIsNearBlack(const lv_image_dsc_t* dsc) {
+  if (!dsc || !dsc->data) return false;
+  uint32_t w = dsc->header.w, h = dsc->header.h;
+  if (w == 0 || h == 0) return false;
+  uint32_t stride = dsc->header.stride ? dsc->header.stride : w * 4;
+  uint32_t stepX = (w + 31) / 32, stepY = (h + 31) / 32;
+  if (stepX == 0) stepX = 1;
+  if (stepY == 0) stepY = 1;
+  uint64_t lumAcc = 0, chromaAcc = 0, alphaAcc = 0;
+  for (uint32_t y = 0; y < h; y += stepY) {
+    const uint8_t* row = dsc->data + (size_t)y * stride;
+    for (uint32_t x = 0; x < w; x += stepX) {
+      const uint8_t* px = row + (size_t)x * 4;
+      uint8_t a = px[3];
+      if (a < 40) continue;  // ignore near-transparent pixels
+      uint8_t b = px[0], g = px[1], r = px[2];
+      // Rec.601 luma, fixed-point: 0.299R + 0.587G + 0.114B.
+      uint32_t lum = (77u * r + 150u * g + 29u * b) >> 8;
+      uint8_t hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+      uint8_t lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
+      lumAcc += (uint64_t)lum * a;
+      chromaAcc += (uint64_t)(hi - lo) * a;  // 0 == perfectly neutral
+      alphaAcc += a;
+    }
+  }
+  if (alphaAcc == 0) return false;  // fully transparent — nothing to back
+  uint32_t meanLuma = (uint32_t)(lumAcc / alphaAcc);
+  uint32_t meanChroma = (uint32_t)(chromaAcc / alphaAcc);
+  return meanLuma < 50 && meanChroma < 28;  // near-black AND neutral
+}
+
+// White circular plate behind a near-black logo, clipped to the circle so the
+// mark reads cleanly — mirrors the letter-badge look.
+void applyDarkLogoBackplate(lv_obj_t* img) {
+  lv_obj_set_style_bg_opa(img, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(img, lv_color_white(), 0);
+  lv_obj_set_style_radius(img, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_clip_corner(img, true, 0);
+}
+
 pngle_t* g_pngle = nullptr;
 
 struct RuntimeLogo {
@@ -500,6 +570,16 @@ RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
     return nullptr;
   }
 
+  // Defer a fresh decode (cache hits above are exempt — they cost no heap)
+  // while contiguous heap is tight, e.g. a TLS fetch is in flight on the net
+  // task. The caller shows a badge; rebuild_logo retries next refresh.
+  if (!runtimeDecodeAffordable()) {
+    log_w("[logo] %s runtime decode deferred (maxalloc=%u<%u) — badge, retry later",
+          symbol.c_str(), (unsigned)ESP.getMaxAllocHeap(),
+          (unsigned)RUNTIME_DECODE_MIN_MAXALLOC);
+    return nullptr;
+  }
+
   RuntimeLogo* logo =
       decodeRuntimeLogo(symbol, path, RUNTIME_LOGO_CACHE_SIDE, &bytes);
   if (!logo) return nullptr;
@@ -538,15 +618,18 @@ void clearRuntimeCache() {
   log_i("[logo] runtime cache cleared");
 }
 
-lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
+lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
+               uint32_t* mountedSig) {
   String up = symbol;
   up.toUpperCase();
+  if (mountedSig) *mountedSig = SIG_BADGE;  // default unless we mount better
 
   // Preferred path: compile-time C array (ARGB8888) — bypasses LittleFS
   // and the LVGL FS / lodepng pipeline entirely, so it renders correctly
   // both on the device and in the desktop sim.
   if (auto* dsc = logos_data::find(up.c_str())) {
     log_i("[logo] %s embedded", up.c_str());
+    if (mountedSig) *mountedSig = SIG_EMBEDDED;
     lv_obj_t* img = lv_image_create(parent);
     lv_image_set_src(img, dsc);
     // Scale the image to the requested slot size. 256 = 1.0x.
@@ -555,6 +638,7 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
       if (scale != 256) lv_image_set_scale(img, scale);
     }
     lv_obj_set_size(img, size, size);
+    if (logoIsNearBlack(dsc)) applyDarkLogoBackplate(img);
     return img;
   }
 
@@ -602,6 +686,8 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
       if (scale != 256) lv_image_set_scale(img, scale);
     }
     lv_obj_set_size(img, size, size);
+    if (logoIsNearBlack(&rt->dsc)) applyDarkLogoBackplate(img);
+    if (mountedSig) *mountedSig = SIG_RUNTIME | (uint32_t)(bytes & 0x00FFFFFFu);
     log_i("[logo] %s runtime mounted argb=%ux%u bytes=%u",
           up.c_str(), (unsigned)rt->dsc.header.w, (unsigned)rt->dsc.header.h,
           (unsigned)bytes);
@@ -620,7 +706,7 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
 uint32_t signature(const String& symbol) {
   String up = symbol;
   up.toUpperCase();
-  if (logos_data::find(up.c_str())) return 0x01000000u;  // embedded
+  if (logos_data::find(up.c_str())) return SIG_EMBEDDED;
 
   String path = logoPath(symbol);
   size_t bytes = 0;
@@ -633,8 +719,8 @@ uint32_t signature(const String& symbol) {
       if (f) { bytes = f.size(); f.close(); }
     }
   }
-  if (exists) return 0x02000000u | (uint32_t)(bytes & 0x00FFFFFFu);
-  return 0x03000000u;  // badge fallback
+  if (exists) return SIG_RUNTIME | (uint32_t)(bytes & 0x00FFFFFFu);
+  return SIG_BADGE;  // badge fallback
 }
 
 }  // namespace logos

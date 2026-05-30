@@ -212,7 +212,10 @@ void write_settings_page(Writer& response, SettingsStore& settings) {
   response.print(F("<h2>Add symbol</h2>"
                    "<form class=add method='POST' action='/add'>"
                    "<input name=symbol placeholder='AMD' maxlength=12 required list=symbols>"
-                   "<button type=submit>Add</button></form>"));
+                   "<button type=submit>Add</button></form>"
+                   "<div class=hint>Heads up: device RAM limits brand logos &mdash; "
+                   "beyond about 5 stocks, extra symbols show a lettered badge "
+                   "instead of their icon.</div>"));
   response.print(PAGE_FOOT_P);
 }
 

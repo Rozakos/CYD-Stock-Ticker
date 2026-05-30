@@ -153,8 +153,11 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   lv_obj_clear_flag(r.obj, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(r.obj, LV_OBJ_FLAG_CLICKABLE);
 
-  r.logo     = logos::make(r.obj, symbol, LOGO_SIZE);
-  r.logo_sig = logos::signature(symbol);
+  // Store the signature of what was ACTUALLY mounted (not signature(), which
+  // reports what's available): if a runtime decode was deferred and a badge
+  // went up instead, the recorded badge sig stays != signature() so rebuild_logo
+  // retries on a later refresh rather than assuming the row is up to date.
+  r.logo     = logos::make(r.obj, symbol, LOGO_SIZE, &r.logo_sig);
   lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
 
   lv_obj_t* sym_col = lv_obj_create(r.obj);
@@ -225,8 +228,9 @@ void rebuild_logo(Row& r) {
   uint32_t want = logos::signature(r.symbol);
   if (r.logo && want == r.logo_sig) return;
   if (r.logo) lv_obj_delete(r.logo);
-  r.logo     = logos::make(r.obj, r.symbol, LOGO_SIZE);
-  r.logo_sig = want;
+  // Record what was actually mounted, not `want`: a deferred/failed runtime
+  // decode mounts a badge, leaving logo_sig != want so the next refresh retries.
+  r.logo     = logos::make(r.obj, r.symbol, LOGO_SIZE, &r.logo_sig);
   lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_move_to_index(r.logo, 0);
 }

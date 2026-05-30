@@ -9,6 +9,18 @@
 
 #define LV_USE_OS LV_OS_NONE
 
+// Draw allocations come from the system heap (CLIB malloc/free), NOT a fixed
+// 32 KB static island. This board has no PSRAM and the static DRAM segment is
+// nearly full (~5.8 KB slack), so a builtin pool large enough to survive a
+// busy chart redraw won't link. Sharing the heap frees ~32 KB of static DRAM
+// and lets the draw path use whatever is free (far more than 32 KB in steady
+// state), which removes the mask-alloc OOM that wrote to NULL -> StoreProhibited.
+// Draw allocs are tiny and freed each frame, so they don't durably fragment the
+// heap they now share with TLS/logos; LV_USE_ASSERT_MALLOC below catches any
+// genuine OOM instead of letting LVGL dereference a NULL.
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB
+
+// Unused under CLIB (kept for reference); only consulted by the builtin pool.
 #ifndef LV_MEM_SIZE
 #define LV_MEM_SIZE (32U * 1024U)
 #endif
@@ -21,7 +33,7 @@
 #define LV_USE_LOG 0
 
 #define LV_USE_ASSERT_NULL 1
-#define LV_USE_ASSERT_MALLOC 0
+#define LV_USE_ASSERT_MALLOC 1
 #define LV_USE_ASSERT_STYLE 0
 #define LV_USE_ASSERT_MEM_INTEGRITY 0
 #define LV_USE_ASSERT_OBJ 0
