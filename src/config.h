@@ -35,4 +35,12 @@ inline constexpr uint16_t SPARKLINE_POINTS = 10;
 // any per-symbol logo content issue.
 inline constexpr bool LOGO_TEST_MODE = false;
 
+// Bump to force a one-time wipe of every cached /logos/*.png on the next boot,
+// so logos re-download at the current server quality/size. The on-disk cache
+// is keyed only by 48x48 dimensions, so a same-size quality change (e.g. the
+// API switching to a Lanczos-from-256px master) is otherwise invisible and the
+// device keeps showing the old, softer file. Increment this whenever the served
+// logo quality/size changes. (1 = original; 2 = high-res master rollout.)
+inline constexpr uint32_t LOGO_CACHE_VERSION = 2;
+
 }  // namespace cfg

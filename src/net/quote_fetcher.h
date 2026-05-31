@@ -19,4 +19,10 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
                   const String& symbol, const String& range,
                   uint32_t gen);
 
+// One-time cache invalidation. If the version stored in /logos/.cachever
+// differs from `version`, delete every cached /logos/*.png (so they re-download
+// at the current server quality/size) and record the new version. Cheap no-op
+// once the versions match. Call once at boot, after LittleFS is mounted.
+void purgeStaleLogoCache(uint32_t version);
+
 }  // namespace fetcher

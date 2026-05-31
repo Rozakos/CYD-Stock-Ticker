@@ -465,4 +465,37 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   return true;
 }
 
+void purgeStaleLogoCache(uint32_t version) {
+  fs_littlefs::Guard g;
+  const char* marker = "/logos/.cachever";
+  uint32_t have = 0;
+  if (LittleFS.exists(marker)) {
+    File vf = LittleFS.open(marker, "r");
+    if (vf) { have = (uint32_t)vf.parseInt(); vf.close(); }
+  }
+  if (have == version) return;  // already current — nothing to do
+
+  if (!LittleFS.exists("/logos")) LittleFS.mkdir("/logos");
+  // Collect first, then remove: deleting during directory iteration can
+  // invalidate the walk on LittleFS.
+  std::vector<String> pngs;
+  File dir = LittleFS.open("/logos");
+  if (dir && dir.isDirectory()) {
+    for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+      String name = e.name();   // basename on some cores, full path on others
+      e.close();
+      if (!name.endsWith(".png")) continue;
+      if (!name.startsWith("/")) name = String("/logos/") + name;
+      pngs.push_back(name);
+    }
+    dir.close();
+  }
+  for (const String& p : pngs) LittleFS.remove(p);
+
+  File wf = LittleFS.open(marker, "w");
+  if (wf) { wf.print(version); wf.close(); }
+  log_i("[logo] cache purged: %u file(s) removed -> version %u",
+        (unsigned)pngs.size(), (unsigned)version);
+}
+
 }  // namespace fetcher

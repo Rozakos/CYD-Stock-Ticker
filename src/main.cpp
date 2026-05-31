@@ -138,6 +138,10 @@ void setup() {
   if (!LittleFS.begin(true)) {
     log_e("LittleFS mount failed");
   }
+  // One-shot wipe of stale cached logos when the logo-cache version changes,
+  // so they re-download at the current server quality (the on-disk cache is
+  // keyed only by 48x48 dims, so a same-size quality bump is otherwise unseen).
+  fetcher::purgeStaleLogoCache(cfg::LOGO_CACHE_VERSION);
   g_settings.begin(API_TOKEN_SEED, WIFI_SSID, WIFI_PASS);
   g_quoteStore.begin();
 
