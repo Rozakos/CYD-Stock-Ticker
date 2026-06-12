@@ -21,12 +21,12 @@ Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-archite
 
 1. Install [PlatformIO](https://platformio.org/) (VS Code extension or CLI).
 2. Copy `src/secrets_example.h` to `src/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, and `API_TOKEN_SEED` (bearer token for the stock-api). `src/secrets.h` is gitignored.
-3. `pio run -t upload` to build & flash. `pio device monitor` to watch logs.
-4. (Optional) drop PNG logos into `data/logos/<SYMBOL>.png` and run `pio run -t uploadfs` to flash the filesystem. Symbols without a PNG fall back to a brand-colored badge automatically; this folder can stay empty.
+3. `pio run -e cyd -t upload` to build & flash. `pio device monitor` to watch logs.
 
 The default partition is `min_spiffs.csv` (1.9 MB app, OTA-capable, ~190 KB
 LittleFS). LittleFS holds the runtime settings (`/settings.json`) and the
-optional `/logos/` directory.
+runtime-fetched `/logos/` cache. Keep `data/` near-empty so `uploadfs` does not
+consume the small filesystem before the device can cache logos.
 
 ## First-boot token seeding
 
@@ -100,8 +100,9 @@ costs no heap). For symbols you always want a real logo for, embed them at
 compile time (see below) — embedded logos live in flash and don't count against
 the RAM cap.
 
-You can also pre-seed logos by dropping PNGs in `data/logos/` (uppercase
-filename, e.g. `AAPL.png`, 48×48 transparent) and running `pio run -t uploadfs`.
+To add or refresh an embedded logo, put its source PNG in `sim/logo_src/` and
+run `python sim/build_logo_arrays.py`. Embedded logos increase firmware flash
+usage, so the bundled set is intentionally limited to AMD.
 
 ## stock-api endpoints
 
@@ -109,10 +110,11 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
 `Authorization: Bearer <token>` and a non-empty `User-Agent`
 (`CYD-Stock-Ticker/1.0 (ESP32)`) — Cloudflare bot-fight blocks empty UAs.
 
-- **List**: `GET /stock/{symbol}` per symbol. Response includes pre-computed
-  `last` and `change_pct` plus a `closes[]` array (up to 5 daily closes,
-  oldest→newest) used directly for the row sparkline. Server-side cached
-  10 min.
+- **List**: `GET /stocks?symbols=AMD,NVDA,...` in batches of up to 16 symbols.
+  Response `quotes[]` entries include `symbol`, pre-computed `last` and
+  `change_pct`, plus a `closes[]` array used directly for the row sparkline.
+  Results are matched by symbol, so omitted or reordered entries do not shift
+  data onto the wrong row. Server-side cached 10 min.
 - **Detail**: `GET /history/{symbol}?range=<range>&limit=<n>` for the trend
   chart. `range` ∈ {`1d`, `1w`, `1mo`, `6mo`, `1y`, `5y`, `max`}. Response
   carries `interval` (`intraday`|`daily`) and `points[]` of `{ts, last}`
@@ -125,10 +127,13 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
   stays small enough for the ESP32 to parse. Requires server Postgres history
   (`DATABASE_URL`); otherwise 503.
 
-The HTTP client uses `useHTTP10(true)` + `Accept-Encoding: identity` to
-avoid chunked transfer and gzip — workarounds carried over from the
-previous backend. JSON parsing uses an ArduinoJson `Filter` so the
-streamed body never lands fully in RAM.
+The HTTP client keeps one HTTP/1.1 TLS connection alive across quote, logo, and
+history requests. It sends `Accept-Encoding: identity`, consumes exact
+`Content-Length` bodies where required, and reconnects once if a reused socket
+is stale. TLS verifies the API server against the pinned GTS WE1 intermediate
+in `src/net/tls_ca_cert.h`; `cfg::API_TLS_VERIFY` defaults to `true`. JSON
+parsing uses an ArduinoJson `Filter` so streamed JSON bodies never land fully
+in RAM.
 
 ## Hardware pinout (already wired in firmware)
 
@@ -177,17 +182,21 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
   | 502  | Yahoo upstream failed and the server had no cached fallback for this symbol. Usually transient; the next refresh works. |
   | 503  | `/history` is unreachable because the server's `DATABASE_URL` isn't configured. List screen still works. |
 
+  Certificate failures usually mean the device clock did not synchronize or
+  the API's certificate chain changed. Update `src/net/tls_ca_cert.h` rather
+  than disabling verification; `cfg::API_TLS_VERIFY = false` is intended only
+  for temporary diagnosis.
+
   Smoke-test from any machine to isolate device vs server:
   ```
   curl -H "Authorization: Bearer <token>" \
        -H "User-Agent: stock-ticker/1.0" \
-       https://rozakos.eu/stocks/api/v1/stock/AMD
+       'https://rozakos.eu/stocks/api/v1/stocks?symbols=AMD'
   ```
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
-- **Logos not showing**: confirm `data/logos/<SYMBOL>.png` exists, then run
-  `pio run -t uploadfs`. The fallback badge always renders, so a blank/empty
-  `data/logos/` is a valid configuration.
+- **Logos not showing**: check serial for `[logo]` download/cache/decode logs
+  and confirm LittleFS has free space. The fallback badge always renders.
 - **Out-of-memory at link time after adding fonts/widgets**: the LVGL flush
   buffer (`LINES` in `src/display/lvgl_bridge.cpp`) and `LV_MEM_SIZE` in
   `include/lv_conf.h` are the two main DRAM levers.

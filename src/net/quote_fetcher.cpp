@@ -7,6 +7,7 @@
 #include <WiFiClientSecure.h>
 
 #include <time.h>
+#include <algorithm>
 #include <vector>
 
 #include "../config.h"
@@ -14,8 +15,82 @@
 #include "../settings/settings_store.h"
 #include "../ui/logos_data.h"
 #include "quote_store.h"
+#include "tls_ca_cert.h"
 
 namespace {
+
+WiFiClientSecure g_apiClient;
+HTTPClient g_apiHttp;
+bool g_apiTransportReady = false;
+
+void prepareApiTransport() {
+  if (g_apiTransportReady) return;
+  if (cfg::API_TLS_VERIFY) {
+    uint32_t started = millis();
+    while (time(nullptr) < 1704067200 && millis() - started < 10000) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (time(nullptr) < 1704067200) {
+      log_w("[tls] clock not synchronized; certificate validation may fail");
+    }
+    g_apiClient.setCACert(API_TLS_CA_CERT);
+    log_i("[tls] pinned GTS WE1 CA; verification required");
+  } else {
+    g_apiClient.setInsecure();
+    log_w("[tls] certificate verification disabled");
+  }
+  g_apiHttp.setTimeout(10000);
+  g_apiHttp.setReuse(true);
+  g_apiHttp.setUserAgent(cfg::API_USER_AGENT);
+  g_apiTransportReady = true;
+}
+
+void finishApiRequest() {
+  // Clears per-request state while reuse keeps the underlying TLS socket open.
+  g_apiHttp.end();
+}
+
+void abortApiRequest() {
+  g_apiHttp.setReuse(false);
+  g_apiHttp.end();
+  g_apiClient.stop();
+  g_apiHttp.setReuse(true);
+}
+
+int startApiGet(const String& url, const String& token) {
+  prepareApiTransport();
+
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    bool reused = g_apiClient.connected();
+    if (!g_apiHttp.begin(g_apiClient, url)) {
+      log_w("[http] begin failed: %s", url.c_str());
+      return HTTPC_ERROR_CONNECTION_REFUSED;
+    }
+
+    // This core disables reuse in HTTP/1.0 mode. The API returns
+    // Content-Length for identity encoding, so HTTP/1.1 is safe here.
+    g_apiHttp.useHTTP10(false);
+    g_apiHttp.setReuse(true);
+    g_apiHttp.addHeader("Accept-Encoding", "identity");
+    if (token.length()) {
+      g_apiHttp.addHeader("Authorization", String("Bearer ") + token);
+    }
+
+    uint32_t started = millis();
+    int code = g_apiHttp.GET();
+    log_i("[http] %s %s -> %d in %ums", reused ? "reuse" : "connect",
+          url.c_str(), code, (unsigned)(millis() - started));
+    if (!reused && code >= 0) {
+      log_i("[tls] connected heap free=%u maxblk=%u",
+            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    }
+    if (code >= 0 || !reused || attempt != 0) return code;
+
+    log_w("[http] stale keep-alive (%d), reconnecting once", code);
+    abortApiRequest();
+  }
+  return HTTPC_ERROR_CONNECTION_REFUSED;
+}
 
 String logoPath(const String& symbol) {
   String s = symbol;
@@ -32,35 +107,22 @@ String logoPath(const String& symbol) {
 
 bool fetchAndParse(const String& url, const String& token,
                    const JsonDocument& filter, JsonDocument& doc) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setTimeout(10000);
-  http.setReuse(false);
-  if (!http.begin(client, url)) return false;
+  int code = startApiGet(url, token);
 
-  http.useHTTP10(true);                              // avoid chunked transfer
-  http.addHeader("Accept-Encoding", "identity");     // avoid gzip/deflate
-  // Cloudflare bot-fight rejects empty/default User-Agents — required.
-  http.addHeader("User-Agent",       cfg::API_USER_AGENT);
-  if (token.length()) {
-    http.addHeader("Authorization", String("Bearer ") + token);
-  }
-
-  int code = http.GET();
   if (code != 200) {
     log_w("HTTP %d %s", code, url.c_str());
-    http.end();
+    abortApiRequest();
     return false;
   }
 
   DeserializationError err = deserializeJson(
-      doc, http.getStream(), DeserializationOption::Filter(filter));
-  http.end();
+      doc, g_apiHttp.getStream(), DeserializationOption::Filter(filter));
   if (err) {
+    abortApiRequest();
     log_w("json parse: %s", err.c_str());
     return false;
   }
+  finishApiRequest();
   return true;
 }
 
@@ -141,12 +203,9 @@ bool fetchLogo(const String& symbol, const String& token) {
           symbol.c_str(), (unsigned)cw, (unsigned)ch, (int)logoFileComplete(path));
   }
 
-  // A logo download needs a TLS session (~40 KB, contiguous) plus an 8 KB
-  // body buffer. If heap is tight (many resident logos + WiFi/TLS), attempting
-  // it risks an allocation abort that reboots the device. Skip this cycle when
-  // the largest free block is too small — the badge shows until heap recovers,
-  // and quote fetches (more important) keep what headroom remains.
-  if (ESP.getMaxAllocHeap() < 45000) {
+  // TLS is already resident in the persistent client. Keep enough contiguous
+  // space for the logo body buffer so quotes remain the priority under pressure.
+  if (ESP.getMaxAllocHeap() < 16000) {
     log_w("[logo] %s skip download (low heap: free=%u maxblk=%u)",
           symbol.c_str(), (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
@@ -162,25 +221,10 @@ bool fetchLogo(const String& symbol, const String& token) {
   if (cfg::LOGO_TEST_MODE) url += "&test=1";
   log_i("[logo] %s GET %s", symbol.c_str(), url.c_str());
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setTimeout(10000);
-  http.setReuse(false);
-
-  if (!http.begin(client, url)) {
-    log_w("[logo] %s http.begin failed", symbol.c_str());
-    return false;
-  }
-  http.useHTTP10(true);
-  http.addHeader("Accept-Encoding", "identity");
-  http.addHeader("User-Agent", cfg::API_USER_AGENT);
-  if (token.length()) http.addHeader("Authorization", String("Bearer ") + token);
-
-  int code = http.GET();
+  int code = startApiGet(url, token);
   log_i("[logo] %s HTTP %d", symbol.c_str(), code);
   if (code != 200) {
-    http.end();
+    abortApiRequest();
     return false;
   }
 
@@ -195,17 +239,26 @@ bool fetchLogo(const String& symbol, const String& token) {
   body.reserve(8192);
   static constexpr size_t kLogoMaxBytes = 65536;
 
-  WiFiClient* stream = http.getStreamPtr();
+  int expected = g_apiHttp.getSize();
+  if (expected <= 0 || expected > (int)kLogoMaxBytes) {
+    log_w("[logo] %s invalid Content-Length: %d", symbol.c_str(), expected);
+    abortApiRequest();
+    return false;
+  }
+
+  WiFiClient* stream = g_apiHttp.getStreamPtr();
   uint8_t buf[512];
   bool ok = true;
   uint32_t lastData = millis();
-  while (http.connected() && millis() - lastData < 10000) {
+  while (body.size() < (size_t)expected && millis() - lastData < 10000) {
     int avail = stream->available();
     if (!avail) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
     size_t want = avail < (int)sizeof(buf) ? (size_t)avail : sizeof(buf);
+    size_t remaining = (size_t)expected - body.size();
+    if (want > remaining) want = remaining;
     int got = stream->readBytes(buf, want);
     if (got <= 0) break;
     lastData = millis();
@@ -217,10 +270,11 @@ bool fetchLogo(const String& symbol, const String& token) {
     }
     body.insert(body.end(), buf, buf + got);
   }
-  http.end();
+  if (ok && body.size() == (size_t)expected) finishApiRequest();
+  else abortApiRequest();
   log_i("[logo] %s bytes=%u", symbol.c_str(), (unsigned)body.size());
 
-  if (!ok || body.size() < 8) {
+  if (!ok || body.size() != (size_t)expected || body.size() < 8) {
     log_w("[logo] %s body invalid", symbol.c_str());
     return false;
   }
@@ -306,7 +360,7 @@ bool fetchLogo(const String& symbol, const String& token) {
 
 namespace fetcher {
 
-// GET /stock/{symbol} -> { last, change_pct, closes: [...] }
+// GET /stocks?symbols=A,B -> { quotes: [{symbol,last,change_pct,closes}, ...] }
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
   if (syms.empty()) return false;
@@ -316,39 +370,63 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
     return false;
   }
 
-  JsonDocument filter;
-  filter["last"]       = true;
-  filter["change_pct"] = true;
-  filter["closes"]     = true;
-
   std::vector<Quote> out;
   out.reserve(syms.size());
-
   for (const auto& sym : syms) {
     Quote q;
     q.symbol = sym;
+    out.push_back(std::move(q));
+  }
 
-    String url = String(cfg::API_BASE) + "/stock/" + sym;
+  static constexpr size_t kBatchMaxSymbols = 16;
+  for (size_t first = 0; first < syms.size(); first += kBatchMaxSymbols) {
+    size_t last = first + kBatchMaxSymbols;
+    if (last > syms.size()) last = syms.size();
+
+    String requested;
+    for (size_t i = first; i < last; ++i) {
+      if (requested.length()) requested += ',';
+      requested += syms[i];
+    }
+
+    JsonDocument filter;
+    filter["quotes"][0]["symbol"]     = true;
+    filter["quotes"][0]["last"]       = true;
+    filter["quotes"][0]["change_pct"] = true;
+    filter["quotes"][0]["closes"]     = true;
+
+    String url = String(cfg::API_BASE) + "/stocks?symbols=" + requested;
     JsonDocument doc;
-    if (fetchAndParse(url, token, filter, doc)) {
-      q.last      = doc["last"]       | NAN;
-      q.changePct = doc["change_pct"] | NAN;
-      JsonArrayConst closes = doc["closes"].as<JsonArrayConst>();
+    if (!fetchAndParse(url, token, filter, doc)) continue;
+
+    for (JsonVariantConst item : doc["quotes"].as<JsonArrayConst>()) {
+      String symbol = item["symbol"] | "";
+      auto found = std::find_if(out.begin(), out.end(), [&](const Quote& q) {
+        return q.symbol.equalsIgnoreCase(symbol);
+      });
+      if (found == out.end()) continue;
+
+      found->last      = item["last"]       | NAN;
+      found->changePct = item["change_pct"] | NAN;
+      JsonArrayConst closes = item["closes"].as<JsonArrayConst>();
       if (!closes.isNull()) {
-        q.sparkline.reserve(closes.size());
+        found->sparkline.reserve(closes.size());
         for (JsonVariantConst v : closes) {
           float c = v | NAN;
-          if (!isnan(c) && c > 0) q.sparkline.push_back(c);
+          if (!isnan(c) && c > 0) found->sparkline.push_back(c);
         }
       }
-      q.fresh = !isnan(q.last) && !isnan(q.changePct);
-      if (q.fresh) {
-        log_i("[%s] %.2f (%+.2f%%)", sym.c_str(), q.last, q.changePct);
+      found->fresh = !isnan(found->last) && !isnan(found->changePct);
+      if (found->fresh) {
+        log_i("[%s] %.2f (%+.2f%%)", found->symbol.c_str(), found->last,
+              found->changePct);
       } else {
-        log_w("[%s] missing last/change_pct", sym.c_str());
+        log_w("[%s] missing last/change_pct", found->symbol.c_str());
       }
     }
-    out.push_back(q);
+  }
+
+  for (const auto& sym : syms) {
     fetchLogo(sym, token);
     vTaskDelay(pdMS_TO_TICKS(150));  // gentle on the API between calls
   }

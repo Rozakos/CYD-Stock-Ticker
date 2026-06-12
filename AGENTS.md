@@ -52,11 +52,13 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
   `g_lvglMu`; LVGL's own OSAL is set to `LV_OS_NONE` because ESP-IDF doesn't
   ship the `atomic.h` that LVGL's FreeRTOS OSAL expects.
 - **JSON parsing**: ArduinoJson v7 with field filters so the streamed
-  body never lands fully in RAM. `/stock/{sym}` filter keeps `last`,
-  `change_pct`, `closes`; `/history/{sym}` filter keeps `points[].last`.
-- **HTTPS**: `WiFiClientSecure::setInsecure()` + `http.useHTTP10(true)` +
-  `Accept-Encoding: identity`. Don't change these without testing — they
-  are workarounds for actual breakage we've hit in production.
+  body never lands fully in RAM. `/stocks?symbols=...` keeps each quote's
+  `symbol`, `last`, `change_pct`, `closes`; `/history/{sym}` keeps
+  `points[].last`.
+- **HTTPS**: one persistent HTTP/1.1 `WiFiClientSecure` + `HTTPClient`
+  connection, verified against the pinned GTS WE1 intermediate.
+  Requests consume `Content-Length` exactly; a failed reused socket reconnects
+  and retries once. `cfg::API_TLS_VERIFY` defaults true.
 - **stock-api auth**: every request sends `Authorization: Bearer <token>`
   AND a non-empty `User-Agent` (`cfg::API_USER_AGENT`). The UA is *not*
   cosmetic — Cloudflare bot-fight at the edge drops empty/default UAs
@@ -276,6 +278,15 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Persistent verified API connection + batch quotes** (2026-06-12):
+  `quote_fetcher.cpp` now keeps one `WiFiClientSecure` + `HTTPClient` alive
+  across quote/logo/history requests with HTTP/1.1 keep-alive, retries one
+  failed reused socket after reconnecting, and verifies the API host against
+  pinned GTS WE1. Quote refresh uses deployed `GET /stocks?symbols=...`
+  batches (max 16 per request) and keys omitted-aware results by symbol.
+  Logo downloads consume exact `Content-Length`, required for keep-alive.
+  This Arduino-ESP32 core has no TLS session-resumption API.
 
 - **Stabilization pass: touch, progressive 1D, heap-crash fix** (2026-05-29):
   - **Touch un-mirrored at the source.** Screen-horizontal was mirrored (gear
