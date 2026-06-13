@@ -87,6 +87,17 @@ void retrySta(SettingsStore& settings) {
   }
 }
 
+bool connect(const String& ssid, const String& pass) {
+  if (g_ap_active) {
+    log_i("[wifi] dropping setup AP for BLE-provisioned STA join");
+    WiFi.softAPdisconnect(true);
+    g_ap_active = false;
+  }
+  return tryStaConnect(ssid, pass);
+}
+
+void startApFallback() { startAp(); }
+
 bool connected() { return WiFi.status() == WL_CONNECTED; }
 bool apActive()  { return g_ap_active && !connected(); }
 

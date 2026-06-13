@@ -21,6 +21,16 @@ inline constexpr uint32_t MIN_REFRESH_SECONDS     = 15;
 
 inline constexpr const char* SETTINGS_PATH = "/settings.json";
 
+// Reported over BLE device-info (and useful for any future about screen).
+inline constexpr const char* FW_VERSION = "1.0.0";
+
+// How long BLE stays advertising after boot (or a "setup" action) so a phone
+// can (re)provision even when the device already has valid WiFi creds. Once
+// this window closes AND WiFi is connected AND no app is attached, the BLE
+// stack is torn down to return its RAM to the ticker. While unprovisioned the
+// device advertises regardless of this window.
+inline constexpr uint32_t BLE_SETUP_WINDOW_MS = 180000;  // 3 minutes
+
 inline constexpr uint16_t SCREEN_W = 320;
 inline constexpr uint16_t SCREEN_H = 240;
 

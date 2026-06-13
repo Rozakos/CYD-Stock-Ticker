@@ -9,6 +9,7 @@
 #include "display/fs_littlefs.h"
 #include "display/lgfx_cyd.hpp"
 #include "display/lvgl_bridge.h"
+#include "net/ble_provisioning.h"
 #include "net/captive_portal.h"
 #include "net/quote_fetcher.h"
 #include "net/quote_store.h"
@@ -65,7 +66,20 @@ void netTask(void*) {
   // blocking network calls outside the Arduino loop() task.
   disableCore0WDT();
 
+  // Bring BLE up first so the device is already advertising (and answering the
+  // app) while the blocking STA join below runs. NimBLE has its own task, so
+  // advertising continues through wifi_mgr::begin()'s ~15s connect wait.
+  ble_prov::begin();
+  uint32_t ble_window_start = millis();
+  bool     ble_client_was   = false;   // tracks a central connect→disconnect edge
+
   wifi_mgr::begin(g_settings);
+  if (wifi_mgr::connected()) {
+    // Already provisioned: seed "connected" so an app that subscribes during
+    // the boot window immediately learns the IP (advertising stays up for the
+    // window — see the lifecycle block in the loop).
+    ble_prov::setStatus("connected", wifi_mgr::ip(), "");
+  }
 
   bool ap_mode_was = wifi_mgr::apActive();
   if (ap_mode_was) {
@@ -97,6 +111,35 @@ void netTask(void*) {
   uint32_t lastFetch = 0;
   for (;;) {
     captive_portal::loop();
+
+    // --- BLE provisioning: a phone wrote WiFi credentials -----------------
+    // The NimBLE callback only stashes the creds; do the (blocking) join here
+    // on the net task, which owns the radio. Always emit a terminal status so
+    // the app never hangs.
+    String bleSsid, blePass;
+    if (ble_prov::active() && ble_prov::takePendingCreds(bleSsid, blePass)) {
+      log_i("[ble] provisioning join ssid='%s'", bleSsid.c_str());
+      ble_prov::setStatus("connecting", "", "");
+      if (wifi_mgr::connect(bleSsid, blePass)) {
+        g_settings.setWifi(bleSsid, blePass);   // persist -> auto-reconnect on boot
+        ble_prov::setStatus("connected", wifi_mgr::ip(), "");
+        // The setup AP was already dropped by connect(); also free the portal's
+        // DNS/web server if it was running (unprovisioned-boot path).
+        captive_portal::end();
+        ap_mode_was = false;                     // we're on STA now
+      } else {
+        ble_prov::setStatus("failed", "", wifi_mgr::lastFailMessage());
+        // The join dropped any setup AP — rebuild the captive-portal fallback
+        // so a user not using the app can still provision.
+        captive_portal::end();
+        wifi_mgr::startApFallback();
+        captive_portal::begin(g_settings);
+        xSemaphoreTake(g_lvglMu, portMAX_DELAY);
+        wifi_setup_screen::show(wifi_mgr::apSsid(), wifi_mgr::apPass());
+        xSemaphoreGive(g_lvglMu);
+        ap_mode_was = true;
+      }
+    }
 
     if (wifi_mgr::connected()) {
       bringUpStaServices();
@@ -130,6 +173,35 @@ void netTask(void*) {
       // STA came up after a captive-portal save.
       ap_mode_was = false;
     }
+
+    // --- BLE advertising lifecycle ----------------------------------------
+    if (ble_prov::active()) {
+      bool window_open = (millis() - ble_window_start) < cfg::BLE_SETUP_WINDOW_MS;
+      bool wifi_up     = wifi_mgr::connected();
+      bool provisioned = g_settings.wifiSsid().length() > 0;
+      bool client_now  = ble_prov::clientConnected();
+      // The app reads status then disconnects (protocol flow step 6); that
+      // falling edge means the session is done.
+      bool client_left = ble_client_was && !client_now;
+      ble_client_was   = client_now;
+
+      if (wifi_up && !client_now && (!window_open || client_left)) {
+        // Online with no app attached — either the setup window closed or the
+        // provisioning app just finished. Drop the BLE stack so its RAM goes
+        // back to the ticker (which is now doing the TLS-heavy quote fetches).
+        ble_prov::end();
+      } else {
+        // Stay discoverable while a user could still need us (unprovisioned,
+        // or inside the boot/setup window). Drop advertising only once an app
+        // is on the link AND WiFi is up — it gets status over that connection,
+        // which honors "stop advertising once connected" without stranding an
+        // app that hasn't yet discovered an already-provisioned device.
+        bool want_adv = (!provisioned || window_open) && !(wifi_up && client_now);
+        if (want_adv) ble_prov::startAdvertising();
+        else          ble_prov::stopAdvertising();
+      }
+    }
+
     vTaskDelay(pdMS_TO_TICKS(250));
   }
 }

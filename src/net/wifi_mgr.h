@@ -23,6 +23,17 @@ void begin(SettingsStore& settings);
 // portal saves new credentials. Non-blocking; poll `connected()`.
 void retrySta(SettingsStore& settings);
 
+// Attempts an STA join to the given credentials (blocking, ~15s). Returns true
+// on success. Unlike begin()/retrySta(), does NOT start the fallback AP on
+// failure — the caller (BLE provisioning) decides what to do next. Drops any
+// active setup AP first since the join switches the radio to STA mode.
+bool connect(const String& ssid, const String& pass);
+
+// Starts the open setup AP (CYD-Setup-XXXX) so the captive-portal fallback is
+// available again — used after a BLE provisioning attempt left the radio in
+// STA mode. After this, apActive() is true (until WiFi connects).
+void startApFallback();
+
 bool   connected();   // STA WL_CONNECTED
 bool   apActive();    // soft-AP mode is up
 // Last STA join progress (see StaStatus). Written by the net task during a

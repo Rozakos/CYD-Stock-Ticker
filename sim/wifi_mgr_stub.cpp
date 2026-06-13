@@ -10,6 +10,8 @@ namespace wifi_mgr {
 
 void begin(SettingsStore&) {}
 void retrySta(SettingsStore&) {}
+bool connect(const String&, const String&) { return false; }
+void startApFallback() {}
 
 bool   connected() { return false; }
 bool   apActive()  { return true; }
