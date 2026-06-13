@@ -40,10 +40,16 @@ lv_obj_t*  g_updated    = nullptr;
 lv_obj_t*  g_gear       = nullptr;
 lv_timer_t* g_rot_timer = nullptr;
 
+// Diameter of the crescent "after-hours" moon icon, in px.
+constexpr lv_coord_t MOON_SIZE = 14;
+
 struct Row {
   lv_obj_t* obj;
   lv_obj_t* logo;
   lv_obj_t* sym;
+  // Crescent-moon badge under the ticker, shown only while the quote carries
+  // an extended-hours (pre/post-market) price. Hidden during regular hours.
+  lv_obj_t* after_icon = nullptr;
   lv_obj_t* price;
   lv_obj_t* pct;
   lv_obj_t* spark;
@@ -136,6 +142,41 @@ void on_row_delete(lv_event_t* e) {
   free(lv_event_get_user_data(e));
 }
 
+// Builds a small crescent-moon "extended hours" badge as a child of `parent`.
+// LVGL's Montserrat font ships no moon glyph, so the crescent is drawn from
+// primitives: a filled disc in `moonColor` with a slightly offset disc in the
+// row background colour stacked on top, carving out the right side. The cutout
+// colour matches the row card so the crescent reads cleanly against it.
+lv_obj_t* make_moon(lv_obj_t* parent) {
+  lv_obj_t* cont = lv_obj_create(parent);
+  lv_obj_remove_style_all(cont);
+  lv_obj_set_size(cont, MOON_SIZE, MOON_SIZE);
+  lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cont, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  lv_obj_t* disc = lv_obj_create(cont);
+  lv_obj_remove_style_all(disc);
+  lv_obj_set_size(disc, MOON_SIZE, MOON_SIZE);
+  lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(disc, lv_color_hex(0xcbd5e1), 0);  // pale moonlight
+  lv_obj_set_style_bg_opa(disc, LV_OPA_COVER, 0);
+  lv_obj_align(disc, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_flag(disc, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+  // Cutout disc, same size, offset up-and-right; rendered after the body disc
+  // so it paints over it. Background colour == row card so it dissolves into
+  // the row, leaving a crescent opening toward the lower-left.
+  lv_obj_t* cut = lv_obj_create(cont);
+  lv_obj_remove_style_all(cut);
+  lv_obj_set_size(cut, MOON_SIZE, MOON_SIZE);
+  lv_obj_set_style_radius(cut, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(cut, styles::card_color(), 0);
+  lv_obj_set_style_bg_opa(cut, LV_OPA_COVER, 0);
+  lv_obj_align(cut, LV_ALIGN_CENTER, 5, -2);
+  lv_obj_add_flag(cut, LV_OBJ_FLAG_EVENT_BUBBLE);
+  return cont;
+}
+
 Row make_row(lv_obj_t* parent, const String& symbol) {
   Row r{};
   r.symbol = symbol;
@@ -180,6 +221,11 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
     lv_label_set_text(r.sym, symbol.c_str());
   }
 
+  // After-hours moon, stacked under the ticker. Hidden until rebuild_rows sees
+  // an extended-hours price for this symbol.
+  r.after_icon = make_moon(sym_col);
+  lv_obj_add_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
+
   r.spark = lv_line_create(r.obj);
   lv_obj_set_size(r.spark, SPARK_W, SPARK_H);
   lv_obj_set_style_line_width(r.spark, 2, 0);
@@ -220,19 +266,29 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   return r;
 }
 
-void rebuild_logo(Row& r) {
+// True while some row's mounted logo doesn't match the best available source
+// (typically a badge standing in for a deferred PNG decode). Drives the
+// retry sweep in tick() so a deferred logo heals within seconds instead of
+// waiting for the next quote refresh — by then the net task has re-opened
+// its TLS session and the decode would be starved all over again.
+bool g_logo_retry_pending = false;
+
+// Returns true when the mounted widget now matches what logos::make would
+// produce (row settled), false when a retry is still pending.
+bool rebuild_logo(Row& r) {
   // No-op when the logo source hasn't changed since the last build —
   // embedded logos always return the same signature and the badge
   // fallback never changes either. Only newly-cached runtime PNGs or
   // a swap between source kinds force the widget recreation.
   uint32_t want = logos::signature(r.symbol);
-  if (r.logo && want == r.logo_sig) return;
+  if (r.logo && want == r.logo_sig) return true;
   if (r.logo) lv_obj_delete(r.logo);
   // Record what was actually mounted, not `want`: a deferred/failed runtime
-  // decode mounts a badge, leaving logo_sig != want so the next refresh retries.
+  // decode mounts a badge, leaving logo_sig != want so a later pass retries.
   r.logo     = logos::make(r.obj, r.symbol, LOGO_SIZE, &r.logo_sig);
   lv_obj_add_flag(r.logo, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_move_to_index(r.logo, 0);
+  return r.logo_sig == want;
 }
 
 void update_spark(Row& r, const std::vector<float>& closes, bool up) {
@@ -315,11 +371,17 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
     for (size_t i = 0; i < g_rows.size(); ++i) {
       lv_obj_set_user_data(g_rows[i].spark, (void*)(uintptr_t)i);
     }
+    // make_row may have mounted badges for deferred decodes; let the first
+    // retry sweep verify (it clears the flag once every row settles).
+    g_logo_retry_pending = true;
   } else {
     // A quote refresh can download a missing runtime logo into LittleFS
     // without changing the symbol list. Rebuild just the logo widget so a
     // row that started as a badge can switch to /logos/<SYMBOL>.png.
-    for (auto& r : g_rows) rebuild_logo(r);
+    g_logo_retry_pending = false;
+    for (auto& r : g_rows) {
+      if (!rebuild_logo(r)) g_logo_retry_pending = true;
+    }
   }
   for (size_t i = 0; i < quotes.size(); ++i) {
     const auto& q = quotes[i];
@@ -331,20 +393,35 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
       lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
       lv_obj_add_style(r.pct, &styles::muted, 0);
       lv_line_set_points(r.spark, r.spark_pts, 0);
+      if (r.after_icon) lv_obj_add_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
       continue;
     }
+    // During extended hours the row headlines the pre/post-market print (the
+    // way Revolut does), flagged by the moon icon under the ticker. Falls back
+    // to the regular last/change when no extended price is available.
+    bool  ext      = q.extended();
+    float showPrice = ext ? q.extPrice     : q.last;
+    float showPct   = ext ? q.extChangePct : q.changePct;
+    if (isnan(showPct)) showPct = 0.0f;
+    bool  up        = showPct >= 0;
+
+    if (r.after_icon) {
+      if (ext) lv_obj_remove_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
+      else     lv_obj_add_flag   (r.after_icon, LV_OBJ_FLAG_HIDDEN);
+    }
+
     char buf[24];
-    snprintf(buf, sizeof(buf), "%.2f", q.last);
+    snprintf(buf, sizeof(buf), "%.2f", showPrice);
     lv_label_set_text(r.price, buf);
-    snprintf(buf, sizeof(buf), "%s %+.2f%%", q.changePct >= 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, q.changePct);
+    snprintf(buf, sizeof(buf), "%s %+.2f%%",
+             up ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, showPct);
     lv_label_set_text(r.pct, buf);
 
     lv_obj_remove_style(r.pct, &styles::muted, 0);
     lv_obj_remove_style(r.pct, &styles::pct_up, 0);
     lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
-    lv_obj_add_style(r.pct,
-                     q.changePct >= 0 ? &styles::pct_up : &styles::pct_dn, 0);
-    update_spark(r, q.sparkline, q.changePct >= 0);
+    lv_obj_add_style(r.pct, up ? &styles::pct_up : &styles::pct_dn, 0);
+    update_spark(r, q.sparkline, up);
   }
 }
 
@@ -501,6 +578,22 @@ void tick() {
     lastSeen = lu;
   } else {
     refresh_wifi();
+  }
+
+  // Retry sweep for logos whose decode was deferred under heap pressure.
+  // When that happens the net task drops its TLS session (see netTask), so
+  // the contiguous block recovers within a second or two — retry here rather
+  // than waiting a whole refresh cycle, by which point the next fetch has
+  // re-opened TLS and the decode would be starved again. rebuild_logo is a
+  // cheap signature probe per row when nothing changed.
+  static uint32_t lastLogoRetry = 0;
+  if (g_logo_retry_pending && millis() - lastLogoRetry > 3000) {
+    lastLogoRetry = millis();
+    bool pending = false;
+    for (auto& r : g_rows) {
+      if (!rebuild_logo(r)) pending = true;
+    }
+    g_logo_retry_pending = pending;
   }
 }
 

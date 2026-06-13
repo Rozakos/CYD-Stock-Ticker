@@ -92,6 +92,11 @@ int startApiGet(const String& url, const String& token) {
   return HTTPC_ERROR_CONNECTION_REFUSED;
 }
 
+// Set when fetchLogo skips a download because no contiguous block was left
+// even for the body buffer; fetchQuotes then drops the persistent connection
+// at the end of the cycle so the heap recovers before the next retry.
+bool g_logoFetchStarved = false;
+
 String logoPath(const String& symbol) {
   String s = symbol;
   s.toUpperCase();
@@ -206,6 +211,7 @@ bool fetchLogo(const String& symbol, const String& token) {
   // TLS is already resident in the persistent client. Keep enough contiguous
   // space for the logo body buffer so quotes remain the priority under pressure.
   if (ESP.getMaxAllocHeap() < 16000) {
+    g_logoFetchStarved = true;
     log_w("[logo] %s skip download (low heap: free=%u maxblk=%u)",
           symbol.c_str(), (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
@@ -360,6 +366,12 @@ bool fetchLogo(const String& symbol, const String& token) {
 
 namespace fetcher {
 
+void releaseApiConnection() {
+  if (!g_apiClient.connected()) return;
+  log_i("[http] releasing persistent connection (heap recovery)");
+  abortApiRequest();
+}
+
 // GET /stocks?symbols=A,B -> { quotes: [{symbol,last,change_pct,closes}, ...] }
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
@@ -390,10 +402,15 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
     }
 
     JsonDocument filter;
-    filter["quotes"][0]["symbol"]     = true;
-    filter["quotes"][0]["last"]       = true;
-    filter["quotes"][0]["change_pct"] = true;
-    filter["quotes"][0]["closes"]     = true;
+    filter["quotes"][0]["symbol"]                = true;
+    filter["quotes"][0]["last"]                  = true;
+    filter["quotes"][0]["change_pct"]            = true;
+    filter["quotes"][0]["closes"]                = true;
+    filter["quotes"][0]["market_state"]          = true;
+    filter["quotes"][0]["pre_market"]            = true;
+    filter["quotes"][0]["pre_market_change_pct"] = true;
+    filter["quotes"][0]["post_market"]           = true;
+    filter["quotes"][0]["post_market_change_pct"]= true;
 
     String url = String(cfg::API_BASE) + "/stocks?symbols=" + requested;
     JsonDocument doc;
@@ -417,9 +434,32 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
         }
       }
       found->fresh = !isnan(found->last) && !isnan(found->changePct);
+
+      // Extended-hours: market_state selects which conditional block the API
+      // populated. PRE carries pre_market/*_change_pct; POST and CLOSED carry
+      // post_market/*_change_pct; REGULAR leaves both null. Both extended
+      // prices measure their change versus the regular close (found->last).
+      const char* state = item["market_state"] | "";
+      if (strcmp(state, "PRE") == 0) {
+        found->extPrice     = item["pre_market"]            | NAN;
+        found->extChangePct = item["pre_market_change_pct"] | NAN;
+        found->preMarket    = true;
+      } else if (strcmp(state, "POST") == 0 || strcmp(state, "CLOSED") == 0) {
+        found->extPrice     = item["post_market"]            | NAN;
+        found->extChangePct = item["post_market_change_pct"] | NAN;
+        found->preMarket    = false;
+      }
+
       if (found->fresh) {
-        log_i("[%s] %.2f (%+.2f%%)", found->symbol.c_str(), found->last,
-              found->changePct);
+        if (found->extended()) {
+          log_i("[%s] %.2f (%+.2f%%) %s %.2f (%+.2f%%)", found->symbol.c_str(),
+                found->last, found->changePct,
+                found->preMarket ? "pre" : "post", found->extPrice,
+                found->extChangePct);
+        } else {
+          log_i("[%s] %.2f (%+.2f%%)", found->symbol.c_str(), found->last,
+                found->changePct);
+        }
       } else {
         log_w("[%s] missing last/change_pct", found->symbol.c_str());
       }
@@ -429,6 +469,14 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   for (const auto& sym : syms) {
     fetchLogo(sym, token);
     vTaskDelay(pdMS_TO_TICKS(150));  // gentle on the API between calls
+  }
+  if (g_logoFetchStarved) {
+    // At least one logo download was skipped for lack of contiguous heap.
+    // Drop the persistent connection so the TLS buffers come back; the next
+    // refresh reconnects and retries the missing logos with fresh headroom.
+    g_logoFetchStarved = false;
+    log_w("[logo] downloads heap-starved this cycle — releasing connection");
+    releaseApiConnection();
   }
 
   time_t now;

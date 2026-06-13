@@ -13,6 +13,8 @@ void retrySta(SettingsStore&) {}
 
 bool   connected() { return false; }
 bool   apActive()  { return true; }
+StaStatus   staStatus()      { return StaStatus::Idle; }
+const char* lastFailMessage() { return ""; }
 String ip()        { return String("192.168.4.1"); }
 String apSsid()    { return String("CYD-Setup-AB12"); }
 String apPass()    { return String(); }  // open AP

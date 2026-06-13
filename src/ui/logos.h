@@ -35,4 +35,12 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
 // the logo widget when nothing actually changed.
 uint32_t signature(const String& symbol);
 
+// Consumes (returns-and-clears) the "a runtime decode was deferred for lack
+// of contiguous heap" signal, set by make() when it has to mount a badge even
+// though the PNG is cached. The net task polls this and drops its persistent
+// TLS session (~40 KB resident) so the contiguous block recovers before
+// list_screen's periodic logo retry — otherwise the badge would stay up
+// until a reboot. Safe to call from a different task than make()'s.
+bool consumeDecodeStarved();
+
 }  // namespace logos

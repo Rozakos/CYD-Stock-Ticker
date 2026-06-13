@@ -113,6 +113,12 @@ void netTask(void*) {
         fetcher::fetchHistory(g_settings, g_quoteStore,
                               hr.symbol, hr.range, hr.gen);
       }
+      // The UI defers runtime logo decodes when the largest contiguous heap
+      // block is too small — usually because our persistent TLS session holds
+      // ~40 KB of it. Drop the session so the block recovers; list_screen's
+      // retry sweep mounts the logo within seconds and the next fetch
+      // reconnects transparently.
+      if (logos::consumeDecodeStarved()) fetcher::releaseApiConnection();
     } else if (wifi_mgr::apActive() && !ap_mode_was) {
       // Reconnect attempt failed and we fell back to AP — re-arm the portal.
       ap_mode_was = true;

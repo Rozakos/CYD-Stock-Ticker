@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <math.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -13,6 +14,19 @@ struct Quote {
   float               changePct   = NAN;
   bool                fresh       = false;
   std::vector<float>  sparkline;  // last N closes (oldest -> newest)
+
+  // Extended-hours (pre/post-market) snapshot from the API's market_state +
+  // pre_market/post_market fields. extPrice is the latest extended-hours print
+  // and extChangePct its change versus the regular close; both are NAN during
+  // the regular session (or when the API omits them). preMarket distinguishes
+  // a PRE print from a POST/CLOSED one so the UI can label it. See extended().
+  float               extPrice     = NAN;
+  float               extChangePct = NAN;
+  bool                preMarket    = false;
+
+  // True when an extended-hours price is available to show (pre- or
+  // post-market). Drives the list row's moon icon + after-market readout.
+  bool extended() const { return !isnan(extPrice); }
 };
 
 struct History {

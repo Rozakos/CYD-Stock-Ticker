@@ -2,6 +2,7 @@
 
 #include <LittleFS.h>
 
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
@@ -38,17 +39,23 @@ constexpr uint32_t SIG_RUNTIME  = 0x02000000u;   // | (file bytes & 0xFFFFFF)
 constexpr uint32_t SIG_BADGE    = 0x03000000u;
 
 // A runtime PNG decode transiently needs pngle's ~32 KB inflate window plus a
-// ~9 KB pixel buffer. Running it while a TLS fetch on the net task holds its
-// ~40 KB session can drive the largest contiguous block toward zero, which
+// ~9 KB pixel buffer. Running it while the net task's persistent TLS session
+// holds its ~40 KB can drive the largest contiguous block toward zero, which
 // both fails the decode AND (worse) starves LVGL's draw pool mid-redraw.
 // Skip the decode unless there is comfortable contiguous headroom; the badge
-// shows meanwhile and rebuild_logo retries on the next refresh once the block
-// recovers — so a newly added stock no longer needs a reboot to get its icon.
+// shows meanwhile, the deferral raises g_decode_starved so the net task drops
+// the TLS session, and rebuild_logo's retry sweep mounts the real logo a few
+// seconds later — so a missing icon no longer needs a reboot.
 constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 48 * 1024;
 
 bool runtimeDecodeAffordable() {
   return ESP.getMaxAllocHeap() >= RUNTIME_DECODE_MIN_MAXALLOC;
 }
+
+// Set (UI task) when a decode is deferred by the affordability gate; consumed
+// (net task) to drop the persistent TLS session whose resident buffers are
+// usually what keeps the gate from ever passing again once the heap fragments.
+std::atomic<bool> g_decode_starved{false};
 
 // Some brand marks (e.g. MU) are a near-black glyph on a transparent
 // background, so they vanish against the dark UI. Sample the ARGB8888 bitmap
@@ -544,7 +551,7 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
 }
 
 RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
-                               size_t bytes) {
+                               size_t bytes, bool* capMiss) {
   uint32_t sig = 0x02000000u | (uint32_t)(bytes & 0x00FFFFFFu);
   for (const auto& cached : g_runtime_cache) {
     if (cached.symbol == symbol && cached.signature == sig) {
@@ -567,13 +574,16 @@ RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
   if (g_runtime_cache.size() >= MAX_RUNTIME_LOGOS) {
     log_w("[logo] %s runtime cache full (%u) — badge fallback to cap RAM",
           symbol.c_str(), (unsigned)g_runtime_cache.size());
+    if (capMiss) *capMiss = true;
     return nullptr;
   }
 
   // Defer a fresh decode (cache hits above are exempt — they cost no heap)
-  // while contiguous heap is tight, e.g. a TLS fetch is in flight on the net
-  // task. The caller shows a badge; rebuild_logo retries next refresh.
+  // while contiguous heap is tight. The persistent TLS session is the usual
+  // culprit, so signal the net task to release it; the caller shows a badge
+  // and list_screen's retry sweep mounts the real logo a few seconds later.
   if (!runtimeDecodeAffordable()) {
+    g_decode_starved.store(true, std::memory_order_relaxed);
     log_w("[logo] %s runtime decode deferred (maxalloc=%u<%u) — badge, retry later",
           symbol.c_str(), (unsigned)ESP.getMaxAllocHeap(),
           (unsigned)RUNTIME_DECODE_MIN_MAXALLOC);
@@ -607,6 +617,10 @@ void releaseRuntimeDecoder() {
   lgfx_pngle_destroy(g_pngle);
   g_pngle = nullptr;
   log_i("[logo] runtime decoder released");
+}
+
+bool consumeDecodeStarved() {
+  return g_decode_starved.exchange(false, std::memory_order_relaxed);
 }
 
 void clearRuntimeCache() {
@@ -664,17 +678,25 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
     log_i("[logo] %s runtime.decode.start %s (%u bytes)",
           up.c_str(), path.c_str(), (unsigned)bytes);
     bool hadDecoder = (g_pngle != nullptr);
-    RuntimeLogo* rt = cachedRuntimeLogo(up, path, bytes);
+    bool capMiss = false;
+    RuntimeLogo* rt = cachedRuntimeLogo(up, path, bytes, &capMiss);
     if (!rt) {
       // Decode/cache-cap miss. Most often this is transient low heap (cache
       // full or OOM), NOT a bad file — the download path already validates PNG
       // completeness. Do NOT delete the cached file here: deleting forces a
       // wasteful re-download (~40 KB TLS) that worsens the memory pressure and
       // spirals into reboots. Just show the badge; the real logo mounts on a
-      // later refresh once heap frees up.
+      // later retry once heap frees up.
       log_w("[logo] %s runtime decode/cap miss %s bytes=%u — badge fallback",
             up.c_str(), path.c_str(), (unsigned)bytes);
       if (!hadDecoder) releaseRuntimeDecoder();
+      if (capMiss && mountedSig) {
+        // Cache at capacity: retries can't succeed until rows are rebuilt, and
+        // every path that frees slots (clearRuntimeCache) also rebuilds the
+        // rows from scratch. Report the runtime sig as mounted so callers stop
+        // deleting/recreating this badge on every retry tick.
+        *mountedSig = SIG_RUNTIME | (uint32_t)(bytes & 0x00FFFFFFu);
+      }
       return makeBadge(parent, symbol, size);
     }
     if (!hadDecoder) releaseRuntimeDecoder();

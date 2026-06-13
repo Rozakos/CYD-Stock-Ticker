@@ -53,6 +53,10 @@ void seed(QuoteStore& store) {
     make("GOOG", 178.65f, -0.74f,
          {180.0f, 180.2f, 179.6f, 179.8f, 179.2f, 178.9f, 179.0f, 178.5f, 178.8f, 178.65f}),
   };
+  // Extended-hours samples so the after-market moon + readout can be previewed:
+  // NVDA in post-market (down), TSLA in pre-market (up).
+  qs[2].extPrice = 869.00f; qs[2].extChangePct = -0.29f; qs[2].preMarket = false;
+  qs[3].extPrice = 176.50f; qs[3].extChangePct = +1.32f; qs[3].preMarket = true;
   store.setQuotes(std::move(qs), std::time(nullptr));
 
   // Pre-populate detail history for AAPL so the detail screen renders nicely

@@ -19,6 +19,13 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
                   const String& symbol, const String& range,
                   uint32_t gen);
 
+// Drops the persistent API connection so its TLS buffers (~40 KB resident)
+// return to the heap. The net task calls this when the UI reports a runtime
+// logo decode was starved for contiguous heap (logos::consumeDecodeStarved);
+// the next fetch reconnects transparently. No-op when already disconnected.
+// Must be called from the net task — it owns the connection.
+void releaseApiConnection();
+
 // One-time cache invalidation. If the version stored in /logos/.cachever
 // differs from `version`, delete every cached /logos/*.png (so they re-download
 // at the current server quality/size) and record the new version. Cheap no-op

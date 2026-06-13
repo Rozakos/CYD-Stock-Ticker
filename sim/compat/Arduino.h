@@ -176,5 +176,9 @@ extern SerialStub Serial;
 class EspStub {
  public:
   [[noreturn]] void restart() { std::_Exit(0); }
+  // Host has ample RAM; report a large heap so the runtime-logo decode and
+  // any heap-pressure guards behave as "plenty available" in the sim.
+  uint32_t getFreeHeap() { return 4u * 1024u * 1024u; }
+  uint32_t getMaxAllocHeap() { return 4u * 1024u * 1024u; }
 };
 extern EspStub ESP;
