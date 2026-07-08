@@ -441,13 +441,37 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
       // prices measure their change versus the regular close (found->last).
       const char* state = item["market_state"] | "";
       if (strcmp(state, "PRE") == 0) {
+        found->session      = Session::Pre;
         found->extPrice     = item["pre_market"]            | NAN;
         found->extChangePct = item["pre_market_change_pct"] | NAN;
         found->preMarket    = true;
+      } else if (strcmp(state, "REGULAR") == 0) {
+        found->session = Session::Regular;
       } else if (strcmp(state, "POST") == 0 || strcmp(state, "CLOSED") == 0) {
+        found->session      = strcmp(state, "POST") == 0 ? Session::Post
+                                                         : Session::Closed;
         found->extPrice     = item["post_market"]            | NAN;
         found->extChangePct = item["post_market_change_pct"] | NAN;
         found->preMarket    = false;
+      } else {
+        // Older API without market_state: infer the session from whichever
+        // extended field carries a number; both absent leaves Unknown and
+        // the UI falls back to the static "MARKETS" title.
+        float pre = item["pre_market"] | NAN;
+        if (!isnan(pre)) {
+          found->session      = Session::Pre;
+          found->extPrice     = pre;
+          found->extChangePct = item["pre_market_change_pct"] | NAN;
+          found->preMarket    = true;
+        } else {
+          float post = item["post_market"] | NAN;
+          if (!isnan(post)) {
+            found->session      = Session::Post;
+            found->extPrice     = post;
+            found->extChangePct = item["post_market_change_pct"] | NAN;
+            found->preMarket    = false;
+          }
+        }
       }
 
       if (found->fresh) {
@@ -579,6 +603,7 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
 
   History h;
   h.symbol        = symbol;
+  h.gen           = gen;
   h.range         = range;
   h.interval      = interval;
   h.closes        = std::move(closes);

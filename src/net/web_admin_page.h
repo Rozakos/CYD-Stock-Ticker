@@ -59,6 +59,9 @@ inline const char PAGE_HEAD_P[] PROGMEM =
   "form.add input{min-width:0}"
   "form.add input[name=symbol]{width:5em;text-transform:uppercase;flex-shrink:0}"
   "form.add button{flex-shrink:0}"
+  "form.qty{display:flex;gap:6px;margin:0}"
+  "form.qty input{width:6em;padding:6px 8px;font-size:14px}"
+  "form.qty button{padding:6px 10px}"
   ".empty{opacity:.55;font-style:italic;text-align:center}"
   ".banner{background:#2d0e0e;border:1px solid #8c1a1a;color:#ffb3b3;"
   "padding:10px 14px;border-radius:6px;margin-top:14px;font-size:14px}"
@@ -193,15 +196,26 @@ void write_settings_page(Writer& response, SettingsStore& settings) {
                    "<button type=submit>Save settings</button></form>"));
 
   response.print(F("<h2>Symbols</h2><div style='overflow-x:auto'>"
-                   "<table><tr><th>Symbol</th><th></th></tr>"));
+                   "<table><tr><th>Symbol</th><th>Shares</th><th></th></tr>"));
   auto syms = settings.symbols();
   if (syms.empty()) {
-    response.print(F("<tr><td colspan=2 class=empty>No symbols yet &mdash; add one below.</td></tr>"));
+    response.print(F("<tr><td colspan=3 class=empty>No symbols yet &mdash; add one below.</td></tr>"));
   } else {
     for (size_t i = 0; i < syms.size(); ++i) {
       response.print(F("<tr><td><strong>"));
       response.print(html_escape(syms[i]));
-      response.print(F("</strong></td><td><form class=inline method='POST' action='/delete'>"
+      // Shares-owned form: quantity feeds the status bar's portfolio total
+      // + day P/L. 0 (or blank) clears the holding.
+      response.print(F("</strong></td><td>"
+                       "<form class=qty method='POST' action='/shares'>"
+                       "<input type=hidden name=symbol value='"));
+      response.print(html_escape(syms[i]));
+      response.print(F("'><input name=qty type=number step=any min=0 value='"));
+      float qty = settings.shares(syms[i]);
+      if (qty > 0.0f) response.print(String(qty, 2));
+      response.print(F("' placeholder='0'>"
+                       "<button type=submit>Set</button></form>"
+                       "</td><td><form class=inline method='POST' action='/delete'>"
                        "<input type=hidden name=i value='"));
       response.print(String((unsigned)i));
       response.print(F("'><button class=del type=submit>&times;</button></form></td></tr>"));

@@ -76,6 +76,16 @@ void begin(SettingsStore* settings) {
     redirect_to_settings(req);
   });
 
+  g_server.on("/shares", HTTP_POST, [](AsyncWebServerRequest* req) {
+    String sym = req->hasParam("symbol", true) ? req->getParam("symbol", true)->value() : "";
+    String qty = req->hasParam("qty", true)    ? req->getParam("qty", true)->value()    : "";
+    sym.trim();
+    if (sym.length() > 0 && sym.length() <= 12) {
+      g_settings->setShares(sym, qty.toFloat());   // <= 0 clears the holding
+    }
+    redirect_to_settings(req);
+  });
+
   g_server.on("/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
     int idx = req->hasParam("i", true) ? req->getParam("i", true)->value().toInt() : -1;
     auto syms = g_settings->symbols();

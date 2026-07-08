@@ -22,9 +22,10 @@ Quote make(const char* sym, float last, float pct,
 
 void set_history(QuoteStore& store, const char* symbol, const char* interval,
                  const char* range, const std::vector<float>& closes,
-                 time_t step_s) {
+                 time_t step_s, unsigned gen = 0) {
   History h;
   h.symbol   = symbol;
+  h.gen      = gen;
   h.range    = range;
   h.interval = interval;
   h.closes   = closes;
@@ -54,9 +55,13 @@ void seed(QuoteStore& store) {
          {180.0f, 180.2f, 179.6f, 179.8f, 179.2f, 178.9f, 179.0f, 178.5f, 178.8f, 178.65f}),
   };
   // Extended-hours samples so the after-market moon + readout can be previewed:
-  // NVDA in post-market (down), TSLA in pre-market (up).
+  // NVDA in post-market (down), TSLA in pre-market (up). The session fields
+  // drive the status bar (AFTER HOURS title + crescent) and the night
+  // palette — the first fresh symbol reporting one speaks for the list.
   qs[2].extPrice = 869.00f; qs[2].extChangePct = -0.29f; qs[2].preMarket = false;
+  qs[2].session = Session::Post;
   qs[3].extPrice = 176.50f; qs[3].extChangePct = +1.32f; qs[3].preMarket = true;
+  qs[3].session = Session::Pre;
   store.setQuotes(std::move(qs), std::time(nullptr));
 
   // Pre-populate detail history for AAPL so the detail screen renders nicely
@@ -91,13 +96,14 @@ void seed_intraday(QuoteStore& store, const char* symbol) {
   }, 60);
 }
 
-void seed_range_history(QuoteStore& store, const char* symbol, const char* range) {
+void seed_range_history(QuoteStore& store, const char* symbol, const char* range,
+                        unsigned gen) {
   String r(range ? range : "");
   if (r == "1d") {
     set_history(store, symbol, "intraday", "1d", {
       875.0f, 875.4f, 875.1f, 876.0f, 876.5f, 876.1f, 877.0f, 877.4f,
       878.0f, 878.3f, 878.9f, 879.5f
-    }, 60);
+    }, 60, gen);
   } else if (r == "5d") {
     // Real backend returns intraday-resolution data for 5d (handful of
     // candles per day). Model that — interval="intraday" with

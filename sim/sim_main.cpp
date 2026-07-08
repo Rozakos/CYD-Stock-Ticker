@@ -92,7 +92,8 @@ void tick_active_screen() {
 void service_sim_history(QuoteStore& store) {
   HistoryRequest req;
   if (store.takePendingHistory(req)) {
-    fake_data::seed_range_history(store, req.symbol.c_str(), req.range.c_str());
+    fake_data::seed_range_history(store, req.symbol.c_str(), req.range.c_str(),
+                                  req.gen);
   }
 }
 
@@ -133,6 +134,13 @@ int main(int argc, char** argv) {
 
   fake_data::seed(store);
   if (args.intraday) fake_data::seed_intraday(store, args.symbol.c_str());
+
+  // Seed a couple of holdings (once — the sim FS may persist) so the
+  // status bar's portfolio total + day P/L readout can be previewed.
+  if (settings.shares("AAPL") <= 0.0f && settings.shares("NVDA") <= 0.0f) {
+    settings.setShares("AAPL", 10.0f);
+    settings.setShares("NVDA", 2.0f);
+  }
 
   styles::init();
   logos::prepareRuntimeDecoder();

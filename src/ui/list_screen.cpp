@@ -35,13 +35,51 @@ SettingsStore* g_settings = nullptr;
 
 lv_obj_t*  g_scr        = nullptr;
 lv_obj_t*  g_list       = nullptr;
+lv_obj_t*  g_bar        = nullptr;
 lv_obj_t*  g_wifi_icon  = nullptr;
+lv_obj_t*  g_title      = nullptr;
+// Session badge next to the title: an amber disc; at night a bar-colored
+// mask disc carves it into a crescent, in the open session the bare disc
+// reads as a sun. Hidden while the session is Unknown.
+lv_obj_t*  g_sun_icon   = nullptr;
+lv_obj_t*  g_sun_mask   = nullptr;
 lv_obj_t*  g_updated    = nullptr;
 lv_obj_t*  g_gear       = nullptr;
 lv_timer_t* g_rot_timer = nullptr;
 
 // Diameter of the crescent "after-hours" moon icon, in px.
 constexpr lv_coord_t MOON_SIZE = 14;
+// Diameter of the status-bar sun/moon session badge, in px.
+constexpr lv_coord_t SESSION_ICON_SIZE = 12;
+
+// Regular-session palette vs the purple-tinted "night" palette shown
+// outside regular hours (pre-market, after-hours and closed). Day values
+// match styles.cpp so the day theme is exactly the original look.
+constexpr uint32_t DAY_SCREEN_BG     = 0x0b0f17;
+constexpr uint32_t DAY_BAR_BG        = 0x07090d;
+constexpr uint32_t DAY_ROW_BG        = 0x16202d;
+constexpr uint32_t DAY_ROW_PRESSED   = 0x223349;
+constexpr uint32_t NIGHT_SCREEN_BG   = 0x0d0a1e;
+constexpr uint32_t NIGHT_BAR_BG      = 0x0a0718;
+constexpr uint32_t NIGHT_ROW_BG      = 0x1c1836;
+constexpr uint32_t NIGHT_ROW_PRESSED = 0x2b2452;
+
+// Drives the status-bar title + night palette. One symbol speaks for the
+// whole (US-equity) watchlist.
+Session g_session = Session::Unknown;
+
+bool theme_night() {
+  return g_session == Session::Pre || g_session == Session::Post ||
+         g_session == Session::Closed;
+}
+
+lv_color_t row_bg() {
+  return lv_color_hex(theme_night() ? NIGHT_ROW_BG : DAY_ROW_BG);
+}
+
+lv_color_t row_bg_pressed() {
+  return lv_color_hex(theme_night() ? NIGHT_ROW_PRESSED : DAY_ROW_PRESSED);
+}
 
 struct Row {
   lv_obj_t* obj;
@@ -170,7 +208,7 @@ lv_obj_t* make_moon(lv_obj_t* parent) {
   lv_obj_remove_style_all(cut);
   lv_obj_set_size(cut, MOON_SIZE, MOON_SIZE);
   lv_obj_set_style_radius(cut, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(cut, styles::card_color(), 0);
+  lv_obj_set_style_bg_color(cut, row_bg(), 0);
   lv_obj_set_style_bg_opa(cut, LV_OPA_COVER, 0);
   lv_obj_align(cut, LV_ALIGN_CENTER, 5, -2);
   lv_obj_add_flag(cut, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -185,6 +223,11 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   lv_obj_remove_style_all(r.obj);
   lv_obj_add_style(r.obj, &styles::row, LV_STATE_DEFAULT);
   lv_obj_add_style(r.obj, &styles::row_pressed, LV_STATE_PRESSED);
+  // Local bg overrides the shared style so rows built while the night
+  // palette is active come up in the right colour (day values are identical
+  // to the style's, so this is a no-op during regular hours).
+  lv_obj_set_style_bg_color(r.obj, row_bg(), 0);
+  lv_obj_set_style_bg_color(r.obj, row_bg_pressed(), LV_STATE_PRESSED);
   lv_obj_set_size(r.obj, cfg::SCREEN_W - 12, ROW_H);
   lv_obj_set_flex_flow(r.obj, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(r.obj, LV_FLEX_ALIGN_START,
@@ -339,7 +382,64 @@ void update_spark(Row& r, const std::vector<float>& closes, bool up) {
   lv_obj_invalidate(r.spark);
 }
 
+// Swap the market screen between the day palette and the night palette,
+// retitle the status bar for the session and show the sun (open) or
+// crescent moon (pre/post/closed). No-op when the session hasn't changed.
+void apply_market_theme(Session session) {
+  if (session == g_session) return;
+  g_session = session;
+  bool night = theme_night();
+
+  lv_color_t screen_bg = lv_color_hex(night ? NIGHT_SCREEN_BG : DAY_SCREEN_BG);
+  lv_color_t bar_bg    = lv_color_hex(night ? NIGHT_BAR_BG    : DAY_BAR_BG);
+  lv_obj_set_style_bg_color(g_scr,  screen_bg, 0);
+  lv_obj_set_style_bg_color(g_list, screen_bg, 0);
+  lv_obj_set_style_bg_color(g_bar,  bar_bg, 0);
+  for (auto& r : g_rows) {
+    lv_obj_set_style_bg_color(r.obj, row_bg(), 0);
+    lv_obj_set_style_bg_color(r.obj, row_bg_pressed(), LV_STATE_PRESSED);
+    // The row moon's cutout disc must keep matching the row card so the
+    // crescent still dissolves into it (child 1 of the make_moon cont).
+    if (r.after_icon && lv_obj_get_child_count(r.after_icon) >= 2) {
+      lv_obj_set_style_bg_color(lv_obj_get_child(r.after_icon, 1),
+                                row_bg(), 0);
+    }
+  }
+
+  const char* title =
+      session == Session::Pre     ? "PREMARKET"
+      : session == Session::Regular ? "MARKET OPEN"
+      : session == Session::Post  ? "AFTER HOURS"
+      : session == Session::Closed ? "MARKET CLOSED"
+                                   : "MARKETS";
+  lv_label_set_text(g_title, title);
+  log_i("[ui] session: %s", title);
+
+  if (session == Session::Unknown) {
+    lv_obj_add_flag(g_sun_icon, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_obj_remove_flag(g_sun_icon, LV_OBJ_FLAG_HIDDEN);
+  if (night) {
+    // The mask disc matches the bar so the amber disc reads as a crescent.
+    lv_obj_set_style_bg_color(g_sun_mask, bar_bg, 0);
+    lv_obj_remove_flag(g_sun_mask, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(g_sun_mask, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 void rebuild_rows(const std::vector<Quote>& quotes_in) {
+  // Session comes from the first fresh symbol that reported one; apply
+  // before any row work so rows (re)built below pick up the right palette.
+  Session session = Session::Unknown;
+  for (const auto& q : quotes_in) {
+    if (!q.fresh || q.session == Session::Unknown) continue;
+    session = q.session;
+    break;
+  }
+  apply_market_theme(session);
+
   // Stable-partition favourites to the front, preserving relative order in
   // both halves so the rest of the list stays in its natural API order.
   std::vector<Quote> quotes;
@@ -436,17 +536,70 @@ void refresh_wifi() {
   }
 }
 
-void update_status(time_t lastUpdate) {
+// Right side of the bar: portfolio total + day P/L when shares are
+// configured — holdings valued at the extended-hours-aware price against
+// the previous close backed out of the regular quote, so the day P/L
+// naturally includes any extended-hours move. When refreshes stop landing
+// (2 intervals + 5 s slack) an amber "stale Ns" warning takes the slot.
+// With no holdings the slot keeps the last-update HH:MM:SS clock.
+void update_status(time_t lastUpdate, const std::vector<Quote>& quotes) {
   refresh_wifi();
+
+  char buf[32];
+  lv_color_t color = styles::muted_color();
+  time_t now = time(nullptr);
+  // Epoch sanity: before NTP sync both clocks sit near 1970; after a
+  // mid-run sync `now` jumps ahead of a pre-sync lastUpdate. Only trust
+  // the stale math when both stamps are post-2001.
+  bool clock_sane = lastUpdate > 1000000000 && now > 1000000000;
+  long age = clock_sane ? (long)(now - lastUpdate) : 0;
+  uint32_t refresh_s = g_settings ? g_settings->refreshSeconds() : 60;
+
   if (lastUpdate == 0) {
-    lv_label_set_text(g_updated, "—");
+    snprintf(buf, sizeof(buf), "—");
+  } else if (clock_sane && age > (long)(refresh_s * 2 + 5)) {
+    snprintf(buf, sizeof(buf), "stale %lds", age);
+    color = lv_color_hex(0xfbbf24);
   } else {
-    struct tm t;
-    localtime_r(&lastUpdate, &t);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
-             t.tm_hour, t.tm_min, t.tm_sec);
+    float total = 0.0f;
+    float prev  = 0.0f;   // holdings valued at previous close
+    bool  any   = false;
+    for (const auto& q : quotes) {
+      if (!q.fresh) continue;
+      float qty = g_settings ? g_settings->shares(q.symbol) : 0.0f;
+      if (qty <= 0.0f) continue;
+      float shown = q.extended() ? q.extPrice : q.last;
+      // Previous close backed out of the regular-session quote.
+      float prev_close = (!isnan(q.changePct) && q.changePct > -100.0f)
+                             ? q.last / (1.0f + q.changePct / 100.0f)
+                             : q.last;
+      total += qty * shown;
+      prev  += qty * prev_close;
+      any = true;
+    }
+    if (any && prev > 0.0f) {
+      float day_pl = (total - prev) / prev * 100.0f;
+      // Whole dollars keep the status bar narrow even for large totals.
+      snprintf(buf, sizeof(buf), "$%lu %s%.2f%%",
+               (unsigned long)(total + 0.5f),
+               day_pl >= 0.0f ? LV_SYMBOL_UP : LV_SYMBOL_DOWN,
+               fabsf(day_pl));
+      color = day_pl >= 0.0f ? styles::up_color() : styles::dn_color();
+    } else {
+      struct tm t;
+      localtime_r(&lastUpdate, &t);
+      snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+               t.tm_hour, t.tm_min, t.tm_sec);
+    }
+  }
+
+  // Called every tick (the stale countdown needs it) — skip the label
+  // write, and the repaint it forces, when nothing changed.
+  static String prevText;
+  if (prevText != buf) {
+    prevText = buf;
     lv_label_set_text(g_updated, buf);
+    lv_obj_set_style_text_color(g_updated, color, 0);
   }
 }
 
@@ -502,6 +655,7 @@ void build(QuoteStore* store, SettingsStore* settings) {
   lv_obj_clear_flag(g_scr, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t* bar = lv_obj_create(g_scr);
+  g_bar = bar;
   lv_obj_remove_style_all(bar);
   lv_obj_add_style(bar, &styles::status_bar, 0);
   lv_obj_set_size(bar, cfg::SCREEN_W, STATUS_H);
@@ -523,9 +677,47 @@ void build(QuoteStore* store, SettingsStore* settings) {
   lv_obj_set_ext_click_area(g_wifi_icon, 14);
   lv_obj_add_event_cb(g_wifi_icon, on_wifi_click, LV_EVENT_CLICKED, g_settings);
 
-  lv_obj_t* title = lv_label_create(bar);
-  lv_obj_add_style(title, &styles::status_text, 0);
-  lv_label_set_text(title, "MARKETS");
+  // Center slot: [sun/moon badge][session title] packed together in a
+  // little flex box so they travel as one unit inside the bar's
+  // space-between layout.
+  lv_obj_t* title_box = lv_obj_create(bar);
+  lv_obj_remove_style_all(title_box);
+  lv_obj_set_size(title_box, LV_SIZE_CONTENT, STATUS_H - 4);
+  lv_obj_set_flex_flow(title_box, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(title_box, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(title_box, 6, 0);
+  lv_obj_clear_flag(title_box, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Amber disc; the mask disc (bar-colored, offset up-and-right) carves it
+  // into a crescent at night, and stays hidden in the open session so the
+  // bare disc reads as a sun. Both hidden until the API reports a session.
+  g_sun_icon = lv_obj_create(title_box);
+  lv_obj_remove_style_all(g_sun_icon);
+  lv_obj_set_size(g_sun_icon, SESSION_ICON_SIZE, SESSION_ICON_SIZE);
+  lv_obj_clear_flag(g_sun_icon, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_sun_icon, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* sun_disc = lv_obj_create(g_sun_icon);
+  lv_obj_remove_style_all(sun_disc);
+  lv_obj_set_size(sun_disc, SESSION_ICON_SIZE, SESSION_ICON_SIZE);
+  lv_obj_set_style_radius(sun_disc, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(sun_disc, lv_color_hex(0xfbbf24), 0);
+  lv_obj_set_style_bg_opa(sun_disc, LV_OPA_COVER, 0);
+  lv_obj_align(sun_disc, LV_ALIGN_CENTER, 0, 0);
+
+  g_sun_mask = lv_obj_create(g_sun_icon);
+  lv_obj_remove_style_all(g_sun_mask);
+  lv_obj_set_size(g_sun_mask, SESSION_ICON_SIZE, SESSION_ICON_SIZE);
+  lv_obj_set_style_radius(g_sun_mask, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(g_sun_mask, lv_color_hex(NIGHT_BAR_BG), 0);
+  lv_obj_set_style_bg_opa(g_sun_mask, LV_OPA_COVER, 0);
+  lv_obj_align(g_sun_mask, LV_ALIGN_CENTER, 4, -3);
+  lv_obj_add_flag(g_sun_mask, LV_OBJ_FLAG_HIDDEN);
+
+  g_title = lv_label_create(title_box);
+  lv_obj_add_style(g_title, &styles::status_text, 0);
+  lv_label_set_text(g_title, "MARKETS");
 
   g_updated = lv_label_create(bar);
   lv_obj_add_style(g_updated, &styles::status_text, 0);
@@ -574,11 +766,12 @@ void tick() {
   }
   if (lu != lastSeen || g_rows.size() != quotes.size()) {
     rebuild_rows(quotes);
-    update_status(lu);
     lastSeen = lu;
-  } else {
-    refresh_wifi();
   }
+  // Every tick, not just on refresh: the stale countdown and the WiFi
+  // glyph have to keep moving between quote updates. Cheap when idle —
+  // update_status skips the label write when the text hasn't changed.
+  update_status(lu, quotes);
 
   // Retry sweep for logos whose decode was deferred under heap pressure.
   // When that happens the net task drops its TLS session (see netTask), so

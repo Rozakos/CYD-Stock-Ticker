@@ -31,6 +31,14 @@ class SettingsStore {
   // Returns the new state (true = is now favourite). Persists to LittleFS.
   bool toggleFavourite(const String& symbol);
 
+  // Shares owned per symbol ("holdings") — drives the portfolio total +
+  // day P/L readout in the status bar. Keyed by upper-case symbol and
+  // persisted in /settings.json under "shares" as a "SYM=QTY,..." CSV.
+  // Returns 0 for symbols with no holding.
+  float shares(const String& symbol) const;
+  // qty <= 0 removes the entry. Persists to LittleFS.
+  void  setShares(const String& symbol, float qty);
+
   // Atomic update from the web form. Persists to LittleFS.
   void update(const String& apiKey,
               uint32_t refreshSeconds,
@@ -48,6 +56,7 @@ class SettingsStore {
   uint32_t _refresh = 60;
   String   _symbolsCsv;
   String   _favouritesCsv;
+  String   _sharesCsv;   // "AAPL=10,MSFT=2.5" — see shares()/setShares()
   String   _wifiSsid;
   String   _wifiPass;
 };

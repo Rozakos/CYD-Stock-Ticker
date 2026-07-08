@@ -8,6 +8,16 @@
 #include <functional>
 #include <vector>
 
+// The API's market_state field; Unknown when an older API omits it (the
+// parser then falls back to inferring Pre/Post from the price fields).
+enum class Session : uint8_t {
+  Unknown = 0,
+  Pre,
+  Regular,
+  Post,
+  Closed,
+};
+
 struct Quote {
   String              symbol;
   float               last        = NAN;
@@ -24,6 +34,11 @@ struct Quote {
   float               extChangePct = NAN;
   bool                preMarket    = false;
 
+  // Trading session reported alongside the quote. Drives the status-bar
+  // title and the night palette on the list screen; one symbol speaks for
+  // the whole (US-equity) watchlist.
+  Session             session      = Session::Unknown;
+
   // True when an extended-hours price is available to show (pre- or
   // post-market). Drives the list row's moon icon + after-market readout.
   bool extended() const { return !isnan(extPrice); }
@@ -31,6 +46,11 @@ struct Quote {
 
 struct History {
   String              symbol;
+  // Generation of the requestHistory() call this result answers. The detail
+  // screen compares it against the gen it captured when issuing the request,
+  // so a silent same-range auto-refresh can tell fresh data from the stale
+  // window already in the store (symbol+range alone can't).
+  uint32_t            gen = 0;
   String              range;    // API range token this history came from.
   // "intraday" or "daily" — drives the X-axis label formatter on the
   // detail screen (HH:MM vs DD MMM). Left empty for fallback paths.

@@ -73,6 +73,17 @@ bool        g_first_load = true;
 // different range, replacing the request).
 int         g_range_idx          = kDefaultRangeIdx;
 int         g_pending_range_idx  = kDefaultRangeIdx;
+// Generation of the requestHistory call whose result we're waiting on.
+// render only fires when the stored History carries this gen — that's what
+// lets a silent same-range auto-refresh tell fresh data from the stale
+// window already in the store.
+uint32_t    g_wait_gen           = 0;
+// Auto-refresh: when a quote refresh lands while a window is on screen,
+// the displayed range is silently re-requested and re-rendered in place
+// (no blank/spinner); a failed silent fetch keeps the stale window and
+// retries on the next quote refresh instead of surfacing the error label.
+bool        g_silent             = false;
+time_t      g_last_quote_seen    = 0;
 
 lv_obj_t* g_scr        = nullptr;
 lv_obj_t* g_card       = nullptr;
@@ -166,7 +177,8 @@ void start_history_fetch() {
     lv_obj_move_foreground(g_spinner);   // above the (now blank) chart
   }
   lv_obj_invalidate(g_chart);
-  g_store->requestHistory(g_symbol, g_range_api[g_pending_range_idx]);
+  g_silent   = false;
+  g_wait_gen = g_store->requestHistory(g_symbol, g_range_api[g_pending_range_idx]);
 }
 
 // Area-fill is drawn by util::draw_polyline_fill (shared with the list
@@ -572,13 +584,41 @@ void render_history(const History& h) {
         g_symbol.c_str(), g_range_api[g_pending_range_idx],
         first, last, chart_change, (unsigned long)h.closes.size());
 
-  // The detail header reflects the selected chart window. The list screen
-  // still shows the quote's published day change; here every longer range should
-  // show gain/loss from this history's first point to its last point.
+  // The detail header reflects the selected chart window: every longer
+  // range shows gain/loss from this history's first point to its last.
+  // 1D is the exception: like the list rows it compares against the
+  // previous session close (derived from the live quote — the history feed
+  // has no prev_close), so a gap-down day that climbs off the open still
+  // reads red.
+  Quote live;
+  bool have_live = false;
+  for (const auto& q : g_store->snapshot()) {
+    if (q.symbol == g_symbol && q.fresh) {
+      live = q;
+      have_live = true;
+      break;
+    }
+  }
   float change = chart_change;
+  if (progressive && have_live && !isnan(live.changePct) &&
+      live.changePct > -100.0f) {
+    float prev_close = live.last / (1.0f + live.changePct / 100.0f);
+    if (prev_close > 0.0f) {
+      change = (last - prev_close) / prev_close * 100.0f;
+    }
+  }
   bool up = change >= 0;
 
-  snprintf(buf, sizeof(buf), "%.2f", last);
+  // The header price stays on the live quote (extended-hours print when one
+  // is active) so a silent chart refresh doesn't stomp it back to the
+  // session close; the window's last point is only the fallback before the
+  // first quote lands.
+  float header_price = last;
+  if (have_live) {
+    header_price = live.extended() ? live.extPrice : live.last;
+  }
+
+  snprintf(buf, sizeof(buf), "%.2f", header_price);
   lv_label_set_text(g_price, buf);
 
   snprintf(buf, sizeof(buf), "%s %+.2f%%",
@@ -739,6 +779,9 @@ void show(QuoteStore* store, const String& symbol) {
   g_range_idx         = kDefaultRangeIdx;
   g_pending_range_idx = kDefaultRangeIdx;
   g_first_load        = true;   // allow the sparkline fallback to fill the blank
+  // Baseline for the silent auto-refresh: don't treat the refresh that was
+  // already on screen when the user opened detail as "new data landed".
+  g_last_quote_seen   = store->lastUpdate();
   apply_range_styles();
   g_active = true;
   start_history_fetch();
@@ -754,6 +797,14 @@ void tick() {
   // (dedupe in on_range_clicked compares against g_range_idx).
   if (g_loading && g_store->historyError()) {
     g_loading = false;
+    if (g_silent) {
+      // A failed silent refresh keeps the stale window on screen; the next
+      // quote refresh retries. Only a user-initiated fetch surfaces the
+      // error label.
+      g_silent   = false;
+      g_rendered = true;
+      return;
+    }
     g_pending_range_idx = g_range_idx;
     apply_range_styles();   // move the highlight back to the still-displayed range
     if (g_spinner)   lv_obj_add_flag   (g_spinner,   LV_OBJ_FLAG_HIDDEN);
@@ -762,10 +813,26 @@ void tick() {
     return;
   }
 
-  if (g_rendered) return;
+  if (g_rendered) {
+    // Window on screen and nothing in flight: when a quote refresh has
+    // landed since the last request, silently re-request the displayed
+    // range so the chart keeps tracking the live session (no blank, no
+    // spinner — render_history redraws in place when the result arrives).
+    time_t lu = g_store->lastUpdate();
+    if (lu != g_last_quote_seen) {
+      g_last_quote_seen = lu;
+      g_silent   = true;
+      g_loading  = true;
+      g_rendered = false;
+      g_wait_gen = g_store->requestHistory(g_symbol, g_range_api[g_range_idx]);
+    }
+    return;
+  }
   History h = g_store->history();
-  if (h.symbol == g_symbol && h.range == g_range_api[g_pending_range_idx] &&
-      !h.closes.empty()) {
+  // Gen match = this is the answer to OUR latest request. Symbol+range
+  // alone can't distinguish a silent same-range refresh from the stale
+  // window already in the store.
+  if (h.gen == g_wait_gen && h.symbol == g_symbol && !h.closes.empty()) {
     if (g_spinner)   lv_obj_add_flag(g_spinner,   LV_OBJ_FLAG_HIDDEN);
     if (g_err_label) lv_obj_add_flag(g_err_label, LV_OBJ_FLAG_HIDDEN);
     render_history(h);
@@ -775,6 +842,7 @@ void tick() {
     apply_range_styles();
     g_loading    = false;
     g_rendered   = true;
+    g_silent     = false;
     g_first_load = false;   // future switches keep blank+spinner, no flicker
     return;
   }

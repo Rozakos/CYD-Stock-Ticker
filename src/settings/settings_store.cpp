@@ -61,6 +61,7 @@ void SettingsStore::load(const char* seedKey,
       _refresh       = doc["refresh_s"]   | cfg::DEFAULT_REFRESH_SECONDS;
       _symbolsCsv    = doc["symbols"]     | cfg::DEFAULT_SYMBOLS;
       _favouritesCsv = doc["favourites"]  | "";
+      _sharesCsv     = doc["shares"]      | "";
       _wifiSsid      = doc["wifi_ssid"]   | (seedWifiSsid ? seedWifiSsid : "");
       _wifiPass      = doc["wifi_pass"]   | (seedWifiPass ? seedWifiPass : "");
     }
@@ -76,6 +77,7 @@ void SettingsStore::save() const {
   doc["refresh_s"]  = _refresh;
   doc["symbols"]    = _symbolsCsv;
   doc["favourites"] = _favouritesCsv;
+  doc["shares"]     = _sharesCsv;
   doc["wifi_ssid"]  = _wifiSsid;
   doc["wifi_pass"]  = _wifiPass;
 
@@ -147,6 +149,52 @@ bool SettingsStore::toggleFavourite(const String& symbol) {
   save();
   xSemaphoreGive(_mu);
   return !was;
+}
+
+float SettingsStore::shares(const String& symbol) const {
+  String upper = symbol;
+  upper.trim();
+  upper.toUpperCase();
+  if (!upper.length()) return 0.0f;
+
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  String csv = _sharesCsv;
+  xSemaphoreGive(_mu);
+
+  for (const auto& tok : split_csv(csv)) {
+    int eq = tok.indexOf('=');
+    if (eq <= 0) continue;
+    if (tok.substring(0, eq) == upper) {
+      float qty = tok.substring(eq + 1).toFloat();
+      return qty > 0.0f ? qty : 0.0f;
+    }
+  }
+  return 0.0f;
+}
+
+void SettingsStore::setShares(const String& symbol, float qty) {
+  String upper = symbol;
+  upper.trim();
+  upper.toUpperCase();
+  if (!upper.length()) return;
+
+  xSemaphoreTake(_mu, portMAX_DELAY);
+  String csv;
+  for (const auto& tok : split_csv(_sharesCsv)) {
+    int eq = tok.indexOf('=');
+    if (eq <= 0 || tok.substring(0, eq) == upper) continue;  // drop old entry
+    if (csv.length()) csv += ',';
+    csv += tok;
+  }
+  if (qty > 0.0f) {
+    if (csv.length()) csv += ',';
+    // Two decimals covers fractional shares without dragging float noise
+    // into the CSV.
+    csv += upper + "=" + String(qty, 2);
+  }
+  _sharesCsv = csv;
+  save();
+  xSemaphoreGive(_mu);
 }
 
 String SettingsStore::wifiSsid() const {
