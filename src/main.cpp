@@ -2,6 +2,7 @@
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <esp32-hal.h>      // disableCore0WDT
+#include <esp_bt.h>         // esp_bt_mem_release
 #include <lvgl.h>
 #include <time.h>
 
@@ -67,10 +68,30 @@ void netTask(void*) {
   // blocking network calls outside the Arduino loop() task.
   disableCore0WDT();
 
-  // Bring BLE up first so the device is already advertising (and answering the
-  // app) while the blocking STA join below runs. NimBLE has its own task, so
-  // advertising continues through wifi_mgr::begin()'s ~15s connect wait.
-  ble_prov::begin();
+  // BLE provisioning runs ONLY on unprovisioned boots. NimBLE and mbedTLS
+  // cannot coexist on this part: with the BLE stack resident there is never
+  // a contiguous ~17 KB block for the TLS buffers (quotes fail with
+  // MBEDTLS_ERR_SSL_ALLOC_FAILED), and even esp_bt_mem_release() hands the
+  // controller's RAM back as fragmented sub-16 KB heap regions. A
+  // provisioned device is discoverable over mDNS/LAN instead (mdns_svc),
+  // and a WiFi reset (status-bar tap) reboots unprovisioned, which brings
+  // BLE back. On unprovisioned boots, bring BLE up first so the device is
+  // already advertising (and answering the app) while the blocking STA
+  // join below runs — there are no quotes to fetch without WiFi, so the
+  // TLS starvation doesn't matter until provisioning completes (see the
+  // reboot in the lifecycle block below).
+  if (g_settings.wifiSsid().length() == 0) {
+    ble_prov::begin();
+  } else {
+    // BLE will never run this boot, but linking NimBLE statically reserves
+    // the BT controller's ~50 KB of DRAM regardless. Hand it back to the
+    // heap (one-way for this boot) — without this, logo downloads / PNG
+    // decodes stay heap-starved and TLS reconnects fail even though BLE
+    // never started. The returned regions are fragmented (sub-16 KB), but
+    // they absorb the small allocations so the big contiguous block
+    // survives for mbedTLS.
+    esp_bt_mem_release(ESP_BT_MODE_BTDM);
+  }
   uint32_t ble_window_start = millis();
   bool     ble_client_was   = false;   // tracks a central connect→disconnect edge
 
@@ -188,10 +209,18 @@ void netTask(void*) {
       ble_client_was   = client_now;
 
       if (wifi_up && !client_now && (!window_open || client_left)) {
-        // Online with no app attached — either the setup window closed or the
-        // provisioning app just finished. Drop the BLE stack so its RAM goes
-        // back to the ticker (which is now doing the TLS-heavy quote fetches).
+        // Online with no app attached — either the setup window closed or
+        // the provisioning app just finished. BLE only runs on
+        // unprovisioned boots, so reaching here means WiFi credentials
+        // were just provisioned (BLE or captive portal) this boot. The
+        // released BT RAM is too fragmented for TLS (see setup comment),
+        // so quotes can't start in this boot — restart into a clean
+        // provisioned boot: BLE stays down and the ticker gets the full
+        // heap. Credentials are already persisted.
         ble_prov::end();
+        log_i("[ble] provisioning complete — rebooting into ticker mode");
+        delay(200);
+        ESP.restart();
       } else {
         // Stay discoverable while a user could still need us (unprovisioned,
         // or inside the boot/setup window). Drop advertising only once an app

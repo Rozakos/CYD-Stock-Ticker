@@ -382,6 +382,11 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
     return false;
   }
 
+  log_i("[heap] pre-fetch free=%u largest=%u",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                   MALLOC_CAP_8BIT));
+
   std::vector<Quote> out;
   out.reserve(syms.size());
   for (const auto& sym : syms) {

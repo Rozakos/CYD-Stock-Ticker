@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
+#include <esp_bt.h>
 #include <esp_mac.h>
 
 #include "../config.h"
@@ -242,6 +243,17 @@ void end() {
   if (!g_active) return;
   log_i("[ble] tearing down BLE stack (reclaiming RAM)");
   NimBLEDevice::deinit(true);
+  // deinit() stops the host and controller but leaves the BLE controller's
+  // memory (~50 KB) reserved — mbedTLS then never finds a contiguous block
+  // for its TLS buffers and every HTTPS fetch fails with
+  // MBEDTLS_ERR_SSL_ALLOC_FAILED for the rest of the uptime. Hand the
+  // region back to the heap. One-way: BLE cannot re-init this boot, which
+  // matches end()'s contract (a reboot restarts provisioning).
+  esp_err_t ret = esp_bt_mem_release(ESP_BT_MODE_BLE);
+  log_i("[ble] mem_release=%d free=%u largest=%u", (int)ret,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                   MALLOC_CAP_8BIT));
   g_server     = nullptr;
   g_credChar   = nullptr;
   g_statusChar = nullptr;
