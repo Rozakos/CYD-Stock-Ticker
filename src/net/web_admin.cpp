@@ -1,10 +1,12 @@
 #include "web_admin.h"
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 
 #include "../config.h"
 #include "../settings/settings_store.h"
+#include "device_identity.h"
 #include "web_admin_page.h"
 
 namespace {
@@ -82,6 +84,25 @@ void begin(SettingsStore* settings) {
       save_symbols(syms);
     }
     redirect_to_settings(req);
+  });
+
+  // Machine-readable identity for the Rozakos Home app's LAN discovery
+  // (mDNS confirm + subnet-scan probe). Contract:
+  // docs/device-discovery-protocol.md — keep fields in sync with the app.
+  g_server.on("/api/device-info", HTTP_GET, [](AsyncWebServerRequest* req) {
+    JsonDocument d;
+    d["id"]        = device_identity::deviceId();
+    d["name"]      = "CYD Stock Ticker";
+    d["type"]      = "cyd_stock_ticker";
+    d["fw"]        = cfg::FW_VERSION;
+    d["mac"]       = device_identity::macString();
+    d["webUiPath"] = "/settings";
+    JsonArray caps = d["capabilities"].to<JsonArray>();
+    caps.add("web_ui");
+    caps.add("settings");
+    String out;
+    serializeJson(d, out);
+    req->send(200, "application/json", out);
   });
 
   g_server.onNotFound([](AsyncWebServerRequest* req) {

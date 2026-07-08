@@ -11,6 +11,7 @@
 #include "display/lvgl_bridge.h"
 #include "net/ble_provisioning.h"
 #include "net/captive_portal.h"
+#include "net/mdns_svc.h"
 #include "net/quote_fetcher.h"
 #include "net/quote_store.h"
 #include "net/web_admin.h"
@@ -100,6 +101,7 @@ void netTask(void*) {
     setenv("TZ", cfg::TIME_TZ, 1);
     tzset();
     web_admin::begin(&g_settings);
+    mdns_svc::begin();
     xSemaphoreTake(g_lvglMu, portMAX_DELAY);
     lv_screen_load(list_screen::screen());
     xSemaphoreGive(g_lvglMu);
