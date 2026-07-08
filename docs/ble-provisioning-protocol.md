@@ -17,9 +17,13 @@ net task in `src/main.cpp`.
   app scans with a `ServiceUuid` filter and ignores everything else). The
   service UUID rides in the advertisement payload; the local name rides in the
   scan response (a 128-bit UUID + flags nearly fills the 31-byte adv packet).
-- Advertise while unprovisioned, and for ~3 min after boot / on a "setup"
-  action so a user can re-provision. Stop advertising once WiFi is connected
-  (optional but recommended).
+- Advertise only on UNPROVISIONED boots (no stored WiFi credentials). A
+  provisioned device never starts BLE — NimBLE's RAM footprint starves the
+  ticker's TLS client (see AGENTS.md "NimBLE and mbedTLS cannot coexist") —
+  and is discoverable over mDNS/LAN instead (`_rozakos._tcp` +
+  `GET /api/device-info`). To re-provision over BLE, the user taps the WiFi
+  icon on the status bar, which forgets the network and reboots the device
+  unprovisioned.
 
 ## GATT service
 
@@ -57,8 +61,8 @@ the Notify property).
 1. App connects, negotiates MTU (requests 247).
 2. App reads **Device info** (best-effort).
 3. App subscribes to **Status** notifications (writes CCCD). On subscribe the
-   device immediately pushes the current status, so an app that connects to an
-   already-provisioned device learns the IP without writing credentials.
+   device immediately pushes the current status. (Already-provisioned devices
+   don't advertise BLE — the app finds those over mDNS/LAN.)
 4. App writes **Credentials**.
 5. Device attempts WiFi, notifying `connecting` → then `connected` (with `ip`)
    or `failed` (with `reason`).
@@ -78,7 +82,12 @@ the Notify property).
 - The captive-portal AP (`CYD-Setup-XXXX`) remains as a fallback path; BLE is
   additive. A failed BLE join rebuilds the AP + portal so a non-app user can
   still provision.
-- After the setup window closes, if WiFi is connected and no app is attached,
-  the firmware tears down the BLE stack (`NimBLEDevice::deinit`) to return its
-  RAM to the ticker. Re-provisioning over BLE then requires a reboot (or a
-  future "setup" action that re-opens the window).
+- After the setup window closes (or the app reads its terminal status and
+  disconnects), if WiFi is connected and no app is attached, the firmware
+  tears down the BLE stack and **reboots** into a provisioned boot — BLE
+  stays down and the ticker gets the full heap (the released BT RAM is too
+  fragmented for the TLS buffers, so limping on without a reboot would leave
+  quotes dead). The app must therefore finish the flow — read the terminal
+  `connected`/`failed` status and disconnect — before expecting the device
+  at its reported IP; the reboot follows within seconds and the device
+  answers on mDNS + HTTP shortly after.

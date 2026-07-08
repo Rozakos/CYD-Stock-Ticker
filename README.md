@@ -11,11 +11,11 @@ Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-archite
 
 ## UI tour
 
-- **List screen** — one row per symbol with the company logo (or a brand-colored letter badge), a 10-point sparkline, current price, and percent change with a colored up/down arrow. Auto-scrolls every 4 s when the list overflows.
-- **Detail screen** — tap any row. 48 px logo, large price, percent change, and an area-filled trend chart with Y-axis price ticks, X-axis time/date ticks, and a current-price marker dot. A range selector (1D / 1W / 1M / 6M / 1Y / 5Y / Max) sits above the chart; **1D is the default and renders progressively** — the X axis spans the whole trading session and the line fills only the elapsed part of the day (Revolut-style). A **back button** at the top-right returns to the list; tapping the chart does nothing.
-- **Status bar** — wifi indicator (green glyph when connected, red "no link" otherwise; tap it to forget the network and reboot into WiFi setup), section title, last-update timestamp, and a gear icon on the right that opens the settings screen.
+- **List screen** — one row per symbol with the company logo (or a brand-colored letter badge), a 10-point sparkline, current price, and percent change with a colored up/down arrow. During pre/after-market the row headlines the extended-hours print and its change vs the regular close (Revolut-style). Auto-scrolls every 4 s when the list overflows. Outside regular hours the whole screen shifts to a purple-tinted night palette.
+- **Detail screen** — tap any row. Logo, large price (live, extended-hours-aware), percent change, and an area-filled trend chart with Y-axis price ticks, X-axis time/date ticks, and a current-price marker dot. A range selector (1D / 1W / 1M / 6M / 1Y / 5Y / Max) sits above the chart; **1D is the default and renders progressively** — the X axis spans the whole trading session and the line fills only the elapsed part of the day. 1D colors by day change vs the previous close (a gap-down day that climbs off the open still reads red); other ranges color first-to-last of the window. The displayed range silently re-fetches whenever a quote refresh lands, so the chart tracks the live session. A **back button** at the top-right returns to the list; tapping the chart does nothing.
+- **Status bar** — wifi indicator (green glyph when connected, red "no link" otherwise; tap it to forget the network and reboot into WiFi setup); a session-aware center title (PREMARKET / MARKET OPEN / AFTER HOURS / MARKET CLOSED from the API's `market_state`, with an amber sun disc while open and a crescent moon otherwise; static "MARKETS" fallback when the API omits the field); the right slot shows the portfolio total with day P/L when share quantities are configured (green/red, extended-hours-aware vs previous close), an amber "stale Ns" warning when no refresh lands for two intervals (+5 s), or the last-update HH:MM:SS clock otherwise; and a gear icon that opens the settings screen.
 - **Settings screen** — tap the gear. Read-only view of network state (SSID, IP, signal), refresh interval, symbols, and API-key status, plus the `http://<ip>/` URL to open the editable web admin. A **back button** at the top-right returns to the list.
-- **WiFi setup screen** — shown on first boot (or when no saved network connects): a QR code to join the device's setup AP plus a captive-portal page to enter credentials. Live status (Connecting… / Connected / failure reason) is shown on-device so no serial console is needed.
+- **WiFi setup screen** — shown on first boot (or when no saved network connects): a QR code to join the device's setup AP plus a captive-portal page to enter credentials. Live status (Connecting… / Connected / failure reason) is shown on-device so no serial console is needed. Unprovisioned boots also advertise a BLE GATT provisioning service (`CYD-Ticker-XXXX`) for the Rozakos Home app — see `docs/ble-provisioning-protocol.md`. Once provisioning succeeds the device reboots into ticker mode; provisioned boots never start BLE (NimBLE's RAM footprint starves the TLS client — see AGENTS.md) and are discoverable over mDNS instead (`cyd-ticker-xxxx.local`, `_rozakos._tcp`, plus `GET /api/device-info`).
 
 ## Build & flash
 
@@ -23,10 +23,13 @@ Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-archite
 2. Copy `src/secrets_example.h` to `src/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, and `API_TOKEN_SEED` (bearer token for the stock-api). `src/secrets.h` is gitignored.
 3. `pio run -e cyd -t upload` to build & flash. `pio device monitor` to watch logs.
 
-The default partition is `min_spiffs.csv` (1.9 MB app, OTA-capable, ~190 KB
-LittleFS). LittleFS holds the runtime settings (`/settings.json`) and the
-runtime-fetched `/logos/` cache. Keep `data/` near-empty so `uploadfs` does not
-consume the small filesystem before the device can cache logos.
+The partition table is `huge_app.csv` (3 MB app, no OTA, ~896 KB LittleFS) —
+the NimBLE stack pushed the image past min_spiffs' 1.9 MB app slot. LittleFS
+holds the runtime settings (`/settings.json`) and the runtime-fetched
+`/logos/` cache. Keep `data/` near-empty so `uploadfs` does not consume the
+filesystem before the device can cache logos. NOTE: switching partition
+tables requires a full flash erase on the next upload — cached logos and
+`/settings.json` are wiped and regenerate on first boot.
 
 ## First-boot token seeding
 
@@ -59,6 +62,8 @@ The form lets you change:
 - Refresh interval in seconds (minimum 15)
 - API bearer token
 - Symbols through an add/delete table
+- Shares owned per symbol (the table's Shares column; 0 or blank clears the
+  holding) — drives the status bar's portfolio total + day P/L readout
 
 Changes persist to `/settings.json` and apply on the next refresh cycle — no
 reboot required.
@@ -92,13 +97,19 @@ the `IEND` marker), so a truncated transfer can't wedge a symbol on a black
 icon, and an incomplete or wrong-size cache file is re-fetched. Missing logos
 retry every refresh cycle.
 
-Each runtime logo is held decoded in RAM (~9 KB at 48×48 ARGB), so to avoid
+Each runtime logo is held decoded in RAM (~6.4 KB at 40×40 ARGB), so to avoid
 heap exhaustion (and the reboots it caused) the firmware caps resident runtime
 logos at `MAX_RUNTIME_LOGOS` (6) and skips a logo download when the largest
 free heap block is too small. Symbols past the cap show a letter badge (which
 costs no heap). For symbols you always want a real logo for, embed them at
 compile time (see below) — embedded logos live in flash and don't count against
 the RAM cap.
+
+Cached logos are decoded **at boot** (`logos::prewarmRuntimeCache`), before
+the first TLS connection — a decode needs ~45 KB of contiguous heap
+transiently, which only reliably exists in the pristine boot-time heap. A
+symbol added mid-run downloads its PNG on the next refresh but shows a letter
+badge until the next reboot prewarms it.
 
 To add or refresh an embedded logo, put its source PNG in `sim/logo_src/` and
 run `python sim/build_logo_arrays.py`. Embedded logos increase firmware flash
@@ -113,8 +124,13 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
 - **List**: `GET /stocks?symbols=AMD,NVDA,...` in batches of up to 16 symbols.
   Response `quotes[]` entries include `symbol`, pre-computed `last` and
   `change_pct`, plus a `closes[]` array used directly for the row sparkline.
-  Results are matched by symbol, so omitted or reordered entries do not shift
-  data onto the wrong row. Server-side cached 10 min.
+  Extended-hours fields: `market_state` (`PRE`|`REGULAR`|`POST`|`CLOSED`)
+  drives the status-bar session title and night palette;
+  `pre_market`/`pre_market_change_pct` and `post_market`/
+  `post_market_change_pct` are numeric only during their session and feed the
+  rows' extended-hours prices (change measured vs the regular close). Results
+  are matched by symbol, so omitted or reordered entries do not shift data
+  onto the wrong row. Server-side cached 10 min.
 - **Detail**: `GET /history/{symbol}?range=<range>&limit=<n>` for the trend
   chart. `range` ∈ {`1d`, `1w`, `1mo`, `6mo`, `1y`, `5y`, `max`}. Response
   carries `interval` (`intraday`|`daily`) and `points[]` of `{ts, last}`
@@ -196,7 +212,15 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
 - **Logos not showing**: check serial for `[logo]` download/cache/decode logs
-  and confirm LittleFS has free space. The fallback badge always renders.
+  and confirm LittleFS has free space. The fallback badge always renders. A
+  `runtime decode deferred (maxalloc=...)` line means the contiguous-heap gate
+  blocked a mid-run decode — expected for symbols added since the last boot;
+  a reboot prewarms them from the cache.
+- **`SSL - Memory allocation failed` on every fetch**: the heap has no
+  contiguous block for the TLS buffers. Check the per-cycle
+  `[heap] pre-fetch free=... largest=...` serial line; `largest` must stay
+  well above ~17 KB. If this appears on an unprovisioned boot it's expected —
+  BLE provisioning owns the RAM until setup completes and the device reboots.
 - **Out-of-memory at link time after adding fonts/widgets**: the LVGL flush
   buffer (`LINES` in `src/display/lvgl_bridge.cpp`) and `LV_MEM_SIZE` in
   `include/lv_conf.h` are the two main DRAM levers.

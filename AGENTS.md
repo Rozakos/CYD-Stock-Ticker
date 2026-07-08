@@ -7,10 +7,14 @@ and current; delete stale notes rather than leaving them.
 ## What this project is
 
 ESP32-2432S028R "Cheap Yellow Display" firmware: a 320×240 stock ticker.
-List screen of symbols, detail screen with a chart, on-device settings info
-screen, and a small web admin at `/settings` for editing the API bearer
-token / symbols / refresh interval. Data source is a self-hosted yfinance
-proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
+List screen of symbols (session-aware status bar with portfolio day P/L,
+night palette outside regular hours), detail screen with a live-refreshing
+chart, on-device settings info screen, and a small web admin at `/settings`
+for editing the API bearer token / symbols / share quantities / refresh
+interval. Provisioning: captive portal + BLE GATT (unprovisioned boots only);
+provisioned devices advertise over mDNS for the Rozakos Home app. Data source
+is a self-hosted yfinance proxy at `https://rozakos.eu/stocks/api/v1`
+(repo: Rozakos/stock-api).
 
 ## Stack & invariants
 
@@ -63,11 +67,26 @@ proxy at `https://rozakos.eu/stocks/api/v1` (repo: Rozakos/stock-api).
   AND a non-empty `User-Agent` (`cfg::API_USER_AGENT`). The UA is *not*
   cosmetic — Cloudflare bot-fight at the edge drops empty/default UAs
   before the request reaches the FastAPI app.
+- **NimBLE and mbedTLS cannot coexist on this board.** With the BLE stack
+  resident there is never a ~17 KB contiguous block for the TLS buffers —
+  every HTTPS fetch fails with `MBEDTLS_ERR_SSL_ALLOC_FAILED` — and even
+  `esp_bt_mem_release()` returns the controller's RAM as fragmented
+  sub-16 KB heap regions. Therefore: BLE provisioning runs ONLY on
+  unprovisioned boots (`main.cpp` gates `ble_prov::begin()` on empty WiFi
+  creds); a successful provisioning ends with `ESP.restart()` into a clean
+  provisioned boot; and provisioned boots call
+  `esp_bt_mem_release(ESP_BT_MODE_BTDM)` in `setup()` to reclaim the ~50 KB
+  the linked-in controller statically reserves. Do not re-enable BLE on
+  provisioned boots without re-verifying quote fetches on target.
+- **Partition table is `huge_app.csv`** (3 MB app, no OTA, ~896 KB LittleFS)
+  — NimBLE pushed the image past min_spiffs' 1.9 MB slot. Changing partition
+  tables requires a full flash erase (settings + logo cache regenerate).
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 36.2%**, **Flash 82.3%**. Static DRAM is the link-time
-constraint; runtime **heap** is the bigger operational constraint. Levers:
+Last clean build: **RAM 29.9%**, **Flash 64.3%** (huge_app slot). Static DRAM
+is the link-time constraint; runtime **heap** is the bigger operational
+constraint. Levers:
 
 - `LINES` in `src/display/lvgl_bridge.cpp` — partial-render flush buffer
   height. Currently 16 (two buffers of 320×16×2 = ~20 KB total).
@@ -78,14 +97,34 @@ If a future change overflows DRAM (link error
 adding bigger fonts. Fonts go in flash, not DRAM — adding a Montserrat size
 costs flash, not DRAM.
 
-**Runtime heap is what bites with many symbols.** Each runtime logo holds a
-decoded ~9 KB ARGB bitmap for its lifetime, and a TLS fetch needs ~40 KB
-contiguous. Too many logos starved the heap and aborted the firmware
-(`std::vector::reserve` / `SSL - Memory allocation failed`). Guards now in
-place: resident runtime logos are capped (`MAX_RUNTIME_LOGOS=6` in
-`logos.cpp`); a logo download is skipped when `ESP.getMaxAllocHeap() < 45 KB`;
-and a decode failure does **not** delete the cache file (deleting forced a
-re-download spiral). Don't undo these without a heap budget in hand.
+**Runtime heap shape (2026-07-08, provisioned boot, 4 symbols).** After
+`esp_bt_mem_release` in setup(): ~98 KB free, largest block ~94 KB. The BT
+release returns most of its RAM as fragmented sub-16 KB regions that absorb
+small allocations. The boot-time big block is a one-shot resource: the first
+TLS connect (~45 KB) and the LVGL row widgets carve it, and after that the
+largest contiguous block plateaus around ~45 KB for the uptime (releasing
+the TLS session doesn't merge it back). Consequences, all load-bearing:
+
+- **Logo decodes happen at boot** (`logos::prewarmRuntimeCache` in uiTask,
+  after the BT release, before the first TLS connect). A decode transiently
+  needs pngle's ~32 KB inflate window + bitmap + PNG buffer concurrently —
+  mid-run that almost never fits. The affordability gate
+  (`RUNTIME_DECODE_MIN_MAXALLOC`) is 40 KB — the reachable ceiling, not 48.
+- **Resident logo bitmaps are 40×40 ARGB (6.4 KB each)**, cache-capped at
+  `MAX_RUNTIME_LOGOS=6`. At 48×48 (9.2 KB) a TLS reconnect missed fitting
+  its second 16.7 KB buffer by ~700 bytes. The largest on-screen slot is
+  38 px, so 40 px loses nothing visually.
+- **`rebuild_rows` prunes the logo cache (`pruneRuntimeCache`)** to the live
+  symbol set instead of clearing it — a blanket `clearRuntimeCache` on the
+  first build destroys the prewarmed logos right before they mount.
+- Steady state with the persistent TLS connection held: ~19 KB free /
+  ~16 KB largest, zero TLS failures. Every fetch cycle logs
+  `[heap] pre-fetch free=... largest=...` — watch that line when touching
+  anything RAM-adjacent.
+- Older guards still in place: logo downloads skipped under low contiguous
+  heap; a decode failure does **not** delete the cache file (deleting forced
+  a re-download spiral). Don't undo any of this without a heap budget in
+  hand and several on-target refresh cycles.
 
 ## Source layout
 
@@ -102,27 +141,67 @@ src/
     fs_littlefs.{h,cpp}          LVGL FS driver -> LittleFS, drive 'L'
 
   net/
-    quote_store.{h,cpp}          Quote{symbol,last,changePct,fresh,sparkline}
-                                 + History{symbol,closes}. Mutex-guarded.
-    quote_fetcher.{h,cpp}        fetchQuotes / fetchHistory. Filtered JSON.
+    quote_store.{h,cpp}          Quote{symbol,last,changePct,ext*,session,...}
+                                 + History{symbol,gen,range,closes,...}.
+                                 Mutex-guarded. Session enum = market_state.
+    quote_fetcher.{h,cpp}        fetchQuotes / fetchHistory / fetchLogo.
+                                 Filtered JSON, persistent TLS.
     wifi_mgr.{h,cpp}             STA connect + open-AP fallback (CYD-Setup-XXXX)
     captive_portal.{h,cpp}       DNS hijack + AsyncWebServer /save for AP mode
-    web_admin.{h,cpp}            AsyncWebServer at /settings (no auth)
+    ble_provisioning.{h,cpp}     NimBLE GATT provisioning server (see
+                                 docs/ble-provisioning-protocol.md)
+    mdns_svc.{h,cpp}             mDNS responder: <deviceId>.local + _rozakos._tcp
+    device_identity.h            MAC-derived device id shared by mDNS + /api/device-info
+    web_admin.{h,cpp}            AsyncWebServer: /settings, /add, /delete,
+                                 /shares, /api/device-info (no auth)
+    web_admin_page.h             shared /settings HTML (also rendered by the sim)
+    tls_ca_cert.h                pinned GTS WE1 intermediate
 
   settings/
-    settings_store.{h,cpp}       LittleFS-backed runtime settings (incl. wifi creds)
+    settings_store.{h,cpp}       LittleFS-backed runtime settings (wifi creds,
+                                 symbols, favourites, shares "SYM=QTY,..." CSV)
 
   ui/
     styles.{h,cpp}               colors, fonts, brand_color(symbol) lookup
-    logos.{h,cpp}                PNG via LVGL/lodepng with badge fallback
-    list_screen.{h,cpp}          status bar (wifi/title/clock/gear) + rows
-    detail_screen.{h,cpp}        header card + chart card + stats
+    logos.{h,cpp}                embedded/runtime ARGB logos, prewarm + prune,
+                                 badge fallback
+    logos_data.{h,cpp}           compile-time ARGB8888 logo arrays (AMD only)
+    list_screen.{h,cpp}          status bar (wifi / session title + sun-moon /
+                                 portfolio P/L / gear), night palette, rows
+    detail_screen.{h,cpp}        header card + chart card, silent auto-refresh
     settings_screen.{h,cpp}      read-only on-device info screen
     wifi_setup_screen.{h,cpp}    fullscreen QR + instructions shown in AP mode
+
+  util/
+    interpolate.{h,cpp}          PCHIP smoothing (shared with sim + unit tests)
+    area_fill.{h,cpp}            gradient polyline fill under chart/sparklines
 ```
 
 ## How features wire together
 
+- **Session-aware status bar + night palette** (ported from
+  NUCLEO-STOCK-TICKER): the fetcher parses `market_state` into
+  `Quote::session` (PRE/REGULAR/POST/CLOSED; inferred from whichever extended
+  price field is numeric on older APIs). `rebuild_rows` takes the first fresh
+  symbol's session and `apply_market_theme` retitles the bar (PREMARKET /
+  MARKET OPEN / AFTER HOURS / MARKET CLOSED, "MARKETS" fallback for Unknown),
+  shows the amber disc (bare = sun when open; bar-colored mask carves a
+  crescent otherwise) and swaps the DAY_*/NIGHT_* palette on screen/bar/rows.
+  Day palette values intentionally equal styles.cpp so day == original look.
+  There are NO per-row moons — the session is signalled globally only.
+- **Portfolio day P/L / stale slot**: `update_status` runs every tick.
+  Priority: amber `stale Ns` when the last refresh is older than
+  2×interval+5 s (only when both clocks are NTP-sane) → `$total ↑x.xx%`
+  when `SettingsStore::shares()` holdings exist (extended-hours-aware price
+  vs previous close backed out of the regular quote: `last/(1+pct/100)`) →
+  HH:MM:SS clock. Label writes are skipped when the text didn't change.
+- **Detail silent auto-refresh**: `History` carries the request generation
+  (`gen`); the detail screen re-requests the displayed range whenever
+  `QuoteStore::lastUpdate()` changes and renders only when `h.gen` matches
+  its latest request — same-range refreshes are otherwise indistinguishable
+  from the stale window. Silent failures keep the stale window, no error
+  label. 1D header change compares against the previous close from the live
+  quote; the header price always tracks the live (ext-aware) quote.
 - **Brand colors**: `styles::brand_color(symbol)` first hits `kBrandTable`,
   then falls back to an FNV hash into `kFallback`. Used by both the badge and
   (optionally) the chart line.
@@ -157,24 +236,25 @@ src/
 - **Logos**: `logos::make(parent, sym, size)` first looks up an embedded
   ARGB8888 `lv_image_dsc_t` via `logos_data::find(symbol)`
   (`src/ui/logos_data.{cpp,h}`, generated from `sim/logo_src/*.png` by
-  `sim/build_logo_arrays.py`). If the symbol isn't bundled, it falls
-  back to a cached runtime LittleFS PNG (`/logos/<SYMBOL>.png`), decodes
-  it with LovyanGFX `pngle` into a 48×48 ARGB8888 `lv_image_dsc_t`,
-  and mounts that in memory; LVGL bilinearly scales 48→display-slot at
-  draw time (same path as embedded ARGB logos, no on-device downscale).
-  If decode/cache is missing it draws the circular brand-coloured
-  letter badge. The runtime PNG comes from the API at 48×48 (`fetchLogo`
-  always appends `?size=48`); the cache-hit check reads the cached
-  file's IHDR and refetches if the dims aren't 48×48 (handles upgrades
-  from the older 64×64 API response). Both embedded and runtime paths
-  skip LVGL's file-backed PNG renderer, which reported good dimensions
-  but dropped pixels on the CYD. To add or refresh embedded logos: drop
-  PNGs into `sim/logo_src/` and run `python sim/build_logo_arrays.py` from
-  the project root.
-  - **`data/` MUST stay near-empty.** The min_spiffs partition is only
-    192 KB. Anything in `data/` gets baked into the LittleFS image at
-    `uploadfs` time, leaving little room for runtime-fetched logos. The
-    source PNGs that drive `build_logo_arrays.py` deliberately live in
+  `sim/build_logo_arrays.py`). If the symbol isn't bundled, it consults the
+  runtime cache of decoded 40×40 ARGB bitmaps (populated at BOOT by
+  `logos::prewarmRuntimeCache` from the cached LittleFS PNGs — see the
+  Memory budget section for why decodes can't happen mid-run); LVGL
+  bilinearly scales 40→display-slot at draw time (same path as embedded
+  ARGB logos). If no cached bitmap exists it draws the circular
+  brand-coloured letter badge. The runtime PNG comes from the API at 48×48
+  (`fetchLogo` always appends `?size=48`, decode downsamples to 40); the
+  cache-hit check reads the cached file's IHDR and refetches if the dims
+  aren't 48×48. Both embedded and runtime paths skip LVGL's file-backed PNG
+  renderer, which reported good dimensions but dropped pixels on the CYD.
+  Row rebuilds call `logos::pruneRuntimeCache(keep)` — never
+  `clearRuntimeCache` — so decoded logos survive rebuilds. To add or refresh
+  embedded logos: drop PNGs into `sim/logo_src/` and run
+  `python sim/build_logo_arrays.py` from the project root.
+  - **`data/` MUST stay near-empty.** Anything in `data/` gets baked into
+    the LittleFS image at `uploadfs` time, eating the room runtime-fetched
+    logos need (~896 KB partition under huge_app, but the habit stands).
+    The source PNGs that drive `build_logo_arrays.py` deliberately live in
     `sim/logo_src/` (NOT `data/logos/`) for this reason.
   - **Embedded logo set is intentionally tiny — only AMD.** MSFT and NVDA were
     dropped (their `sim/logo_src/*.png` deleted too) so only AMD compiles into
@@ -250,6 +330,13 @@ PIO path on Windows: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
   `#include <Arduino.h>` itself; don't rely on the includer.
 - **DRAM-tight links**: see the memory budget section above before adding
   fonts/widgets.
+- **BLE starves TLS** (see invariants): never start NimBLE on a boot that
+  needs quote fetches. `NimBLEDevice::deinit` does NOT return the
+  controller's RAM; `esp_bt_mem_release` returns it fragmented.
+- **Decode ordering is load-bearing**: `esp_bt_mem_release` (setup) →
+  `logos::prewarmRuntimeCache` (uiTask start) → first TLS connect (netTask).
+  Reordering any of these re-breaks logos or quotes; verify on target with
+  the `[heap]` serial line across several refresh cycles.
 
 ## LVGL desktop simulator
 
@@ -278,6 +365,41 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Runtime logos coexist with TLS; per-row moons removed** (2026-07-08,
+  `0080e41`): logo decodes moved to a boot-time prewarm (pristine heap),
+  row rebuilds prune instead of clear the logo cache, bitmaps shrank to
+  40×40 (6.4 KB), the decode gate dropped to 40 KB, and the BT memory
+  release moved into setup() ahead of the prewarm. Also removed the
+  per-row crescent badges — the status bar carries the session signal.
+  Full heap forensics in the Memory budget section and the commit message.
+
+- **TLS heap starvation fix: BLE only on unprovisioned boots** (2026-07-08,
+  `bffbf4d`): with NimBLE resident every HTTPS fetch failed
+  (`MBEDTLS_ERR_SSL_ALLOC_FAILED`) — including after teardown, because
+  `deinit` leaves the controller RAM reserved and `esp_bt_mem_release`
+  returns it fragmented. BLE now starts only when no WiFi creds exist;
+  successful provisioning reboots into a clean provisioned boot;
+  provisioned boots release BT RAM up front. fetchQuotes logs
+  `[heap] pre-fetch free/largest` every cycle. This bug shipped silently
+  in the BLE commit (b632f3b) — the device had never run that firmware
+  until 2026-07-08.
+
+- **NUCLEO feature port** (2026-07-08, `27fab6a`, from
+  NUCLEO-STOCK-TICKER 88067ad + 9223ee9 + f916efe): session-aware status
+  bar (market-state title, sun/crescent, purple night palette outside
+  regular hours), shares-owned holdings (settings + web admin `/shares` +
+  Shares column) feeding a portfolio total + day P/L in the bar's right
+  slot with an amber stale warning, 1D chart colored by day change vs
+  previous close, live ext-aware detail header price, and silent detail
+  chart auto-refresh keyed off quote refreshes (History gained `gen`).
+  Sim seeds sessions + holdings so all of it renders headlessly.
+
+- **mDNS LAN discovery** (2026-07-08, `002cc21`): `mdns_svc` advertises
+  `<deviceId>.local` + `_rozakos._tcp` (TXT id/type/fw/mac/path) and the
+  web admin serves `GET /api/device-info` for the Rozakos Home app's
+  subnet-scan confirm. Identity derives from the efuse STA MAC
+  (`device_identity.h`) so it matches the BLE/AP name suffix.
 
 - **Persistent verified API connection + batch quotes** (2026-06-12):
   `quote_fetcher.cpp` now keeps one `WiFiClientSecure` + `HTTPClient` alive
@@ -783,15 +905,18 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Likely next asks
 
-- Long-press a row to mark it as a "favorite" / pin to top.
-- Switch to hourly bars (`interval=1h`) on a long-press of the chart.
+- Holdings line on the detail screen (`N sh = $V`, NUCLEO has it; CYD's
+  compact 36 px header needs a layout decision first).
+- Trigger a mid-run prewarm for a newly added symbol right after its PNG
+  downloads (currently badges until the next reboot).
 - Per-symbol price-alert thresholds in the settings form.
+- Switch to hourly bars (`interval=1h`) on a long-press of the chart.
 - Greek month abbreviations: need Montserrat 12/14 rebuilt with Greek Unicode
-  range (U+0370–U+03FF) via the LVGL font converter. Flash ~82% now, so there's
-  some room, but new fonts are the biggest flash cost.
+  range (U+0370–U+03FF) via the LVGL font converter. Flash ~64% now under
+  huge_app, so there's room, but new fonts are the biggest flash cost.
 - LRU eviction of `/logos/<SYM>.png` for symbols no longer in the list (the
-  128 KB LittleFS partition never reclaims old logos; a fs-full write guard
-  prevents crashes but new logos silently stop caching once it fills).
+  partition never reclaims old logos; a fs-full write guard prevents crashes
+  but new logos silently stop caching once it fills — less urgent at 896 KB).
 
 Don't pre-build any of these unless asked — list them so the next session
 has a head start.
