@@ -37,6 +37,10 @@ void uiTask(void*) {
   xSemaphoreTake(g_lvglMu, portMAX_DELAY);
   styles::init();
   logos::prepareRuntimeDecoder();
+  // Decode the cached logo PNGs NOW, while the heap still has its pristine
+  // boot-time contiguous block — once the TLS session and the row widgets
+  // carve it up, runtime decodes mostly fail and rows fall back to badges.
+  logos::prewarmRuntimeCache(g_settings.symbols());
   settings_screen::init(&g_settings);
   list_screen::build(&g_quoteStore, &g_settings);
   logos::releaseRuntimeDecoder();
@@ -80,18 +84,9 @@ void netTask(void*) {
   // join below runs — there are no quotes to fetch without WiFi, so the
   // TLS starvation doesn't matter until provisioning completes (see the
   // reboot in the lifecycle block below).
-  if (g_settings.wifiSsid().length() == 0) {
-    ble_prov::begin();
-  } else {
-    // BLE will never run this boot, but linking NimBLE statically reserves
-    // the BT controller's ~50 KB of DRAM regardless. Hand it back to the
-    // heap (one-way for this boot) — without this, logo downloads / PNG
-    // decodes stay heap-starved and TLS reconnects fail even though BLE
-    // never started. The returned regions are fragmented (sub-16 KB), but
-    // they absorb the small allocations so the big contiguous block
-    // survives for mbedTLS.
-    esp_bt_mem_release(ESP_BT_MODE_BTDM);
-  }
+  // BLE runs only on unprovisioned boots; on provisioned boots setup()
+  // already released the BT controller's RAM to the heap (see setup()).
+  if (g_settings.wifiSsid().length() == 0) ble_prov::begin();
   uint32_t ble_window_start = millis();
   bool     ble_client_was   = false;   // tracks a central connect→disconnect edge
 
@@ -253,6 +248,17 @@ void setup() {
   fetcher::purgeStaleLogoCache(cfg::LOGO_CACHE_VERSION);
   g_settings.begin(API_TOKEN_SEED, WIFI_SSID, WIFI_PASS);
   g_quoteStore.begin();
+
+  // Provisioned boot: BLE will never run (netTask skips ble_prov::begin),
+  // but linking NimBLE statically reserves the BT controller's ~50 KB of
+  // DRAM regardless. Hand it back to the heap NOW, before the tasks start —
+  // the returned regions are fragmented (sub-16 KB), and doing this before
+  // logos::prewarmRuntimeCache lets the ~9 KB logo bitmaps settle into
+  // those fragments (TLSF good-fit) instead of carving up the big
+  // contiguous block that mbedTLS needs for the TLS buffers.
+  if (g_settings.wifiSsid().length() > 0) {
+    esp_bt_mem_release(ESP_BT_MODE_BTDM);
+  }
 
   g_gfx.init();
   g_gfx.setRotation(1);   // landscape, USB-C/header at left

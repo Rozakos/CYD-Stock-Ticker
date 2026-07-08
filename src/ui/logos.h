@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <lvgl.h>
 
+#include <vector>
+
 namespace logos {
 
 // Allocates the reusable runtime PNG decoder before UI widgets fragment the
@@ -16,6 +18,21 @@ void releaseRuntimeDecoder();
 // Frees decoded runtime logos after their owning LVGL widgets have been
 // deleted. Call immediately after cleaning a screen/list that used them.
 void clearRuntimeCache();
+
+// Drops cached runtime logos for symbols NOT in `keep` (case-insensitive)
+// and keeps the rest mounted-ready. Use this instead of clearRuntimeCache()
+// when rebuilding rows for a (possibly) changed symbol set: decoded logos
+// survive the rebuild, which matters because a mid-run re-decode needs a
+// ~45 KB contiguous block that rarely exists once TLS is up (the boot-time
+// prewarm below is usually the only decode that ever succeeds).
+void pruneRuntimeCache(const std::vector<String>& keep);
+
+// Decodes every cached /logos/<SYMBOL>.png for `symbols` into the runtime
+// cache. Call at boot, between prepareRuntimeDecoder() and the first network
+// activity: the decode needs ~45 KB of contiguous heap transiently, which is
+// only reliably available before the TLS session and the row widgets carve
+// up the boot-time block. Later make() calls then hit the cache for free.
+void prewarmRuntimeCache(const std::vector<String>& symbols);
 
 // Creates a square logo for `symbol` sized `size` x `size`.
 // Resolves /logos/<SYMBOL>.png on LittleFS; if missing, draws a circular

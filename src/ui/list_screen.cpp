@@ -47,8 +47,6 @@ lv_obj_t*  g_updated    = nullptr;
 lv_obj_t*  g_gear       = nullptr;
 lv_timer_t* g_rot_timer = nullptr;
 
-// Diameter of the crescent "after-hours" moon icon, in px.
-constexpr lv_coord_t MOON_SIZE = 14;
 // Diameter of the status-bar sun/moon session badge, in px.
 constexpr lv_coord_t SESSION_ICON_SIZE = 12;
 
@@ -85,9 +83,6 @@ struct Row {
   lv_obj_t* obj;
   lv_obj_t* logo;
   lv_obj_t* sym;
-  // Crescent-moon badge under the ticker, shown only while the quote carries
-  // an extended-hours (pre/post-market) price. Hidden during regular hours.
-  lv_obj_t* after_icon = nullptr;
   lv_obj_t* price;
   lv_obj_t* pct;
   lv_obj_t* spark;
@@ -180,41 +175,6 @@ void on_row_delete(lv_event_t* e) {
   free(lv_event_get_user_data(e));
 }
 
-// Builds a small crescent-moon "extended hours" badge as a child of `parent`.
-// LVGL's Montserrat font ships no moon glyph, so the crescent is drawn from
-// primitives: a filled disc in `moonColor` with a slightly offset disc in the
-// row background colour stacked on top, carving out the right side. The cutout
-// colour matches the row card so the crescent reads cleanly against it.
-lv_obj_t* make_moon(lv_obj_t* parent) {
-  lv_obj_t* cont = lv_obj_create(parent);
-  lv_obj_remove_style_all(cont);
-  lv_obj_set_size(cont, MOON_SIZE, MOON_SIZE);
-  lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(cont, LV_OBJ_FLAG_EVENT_BUBBLE);
-
-  lv_obj_t* disc = lv_obj_create(cont);
-  lv_obj_remove_style_all(disc);
-  lv_obj_set_size(disc, MOON_SIZE, MOON_SIZE);
-  lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(disc, lv_color_hex(0xcbd5e1), 0);  // pale moonlight
-  lv_obj_set_style_bg_opa(disc, LV_OPA_COVER, 0);
-  lv_obj_align(disc, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_add_flag(disc, LV_OBJ_FLAG_EVENT_BUBBLE);
-
-  // Cutout disc, same size, offset up-and-right; rendered after the body disc
-  // so it paints over it. Background colour == row card so it dissolves into
-  // the row, leaving a crescent opening toward the lower-left.
-  lv_obj_t* cut = lv_obj_create(cont);
-  lv_obj_remove_style_all(cut);
-  lv_obj_set_size(cut, MOON_SIZE, MOON_SIZE);
-  lv_obj_set_style_radius(cut, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(cut, row_bg(), 0);
-  lv_obj_set_style_bg_opa(cut, LV_OPA_COVER, 0);
-  lv_obj_align(cut, LV_ALIGN_CENTER, 5, -2);
-  lv_obj_add_flag(cut, LV_OBJ_FLAG_EVENT_BUBBLE);
-  return cont;
-}
-
 Row make_row(lv_obj_t* parent, const String& symbol) {
   Row r{};
   r.symbol = symbol;
@@ -263,11 +223,6 @@ Row make_row(lv_obj_t* parent, const String& symbol) {
   } else {
     lv_label_set_text(r.sym, symbol.c_str());
   }
-
-  // After-hours moon, stacked under the ticker. Hidden until rebuild_rows sees
-  // an extended-hours price for this symbol.
-  r.after_icon = make_moon(sym_col);
-  lv_obj_add_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
 
   r.spark = lv_line_create(r.obj);
   lv_obj_set_size(r.spark, SPARK_W, SPARK_H);
@@ -398,12 +353,6 @@ void apply_market_theme(Session session) {
   for (auto& r : g_rows) {
     lv_obj_set_style_bg_color(r.obj, row_bg(), 0);
     lv_obj_set_style_bg_color(r.obj, row_bg_pressed(), LV_STATE_PRESSED);
-    // The row moon's cutout disc must keep matching the row card so the
-    // crescent still dissolves into it (child 1 of the make_moon cont).
-    if (r.after_icon && lv_obj_get_child_count(r.after_icon) >= 2) {
-      lv_obj_set_style_bg_color(lv_obj_get_child(r.after_icon, 1),
-                                row_bg(), 0);
-    }
   }
 
   const char* title =
@@ -462,7 +411,16 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
   if (!same) {
     lv_obj_clean(g_list);
     g_rows.clear();
-    logos::clearRuntimeCache();
+    // Prune (don't clear) so decoded logos survive the rebuild — including
+    // the boot-time prewarmed ones the very first build mounts. A blanket
+    // clear forced mid-run re-decodes, which rarely find the ~45 KB
+    // contiguous block they need once TLS is up.
+    {
+      std::vector<String> keep;
+      keep.reserve(quotes.size());
+      for (const auto& q : quotes) keep.push_back(q.symbol);
+      logos::pruneRuntimeCache(keep);
+    }
     g_rows.reserve(quotes.size());
     for (const auto& q : quotes) g_rows.push_back(make_row(g_list, q.symbol));
     // Bake the row index into each sparkline's user_data now that the
@@ -493,22 +451,18 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
       lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
       lv_obj_add_style(r.pct, &styles::muted, 0);
       lv_line_set_points(r.spark, r.spark_pts, 0);
-      if (r.after_icon) lv_obj_add_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
       continue;
     }
     // During extended hours the row headlines the pre/post-market print (the
-    // way Revolut does), flagged by the moon icon under the ticker. Falls back
-    // to the regular last/change when no extended price is available.
+    // way Revolut does). The session is signalled globally — status-bar
+    // title, crescent and night palette — rather than per row, since the
+    // whole US-equity watchlist shares it. Falls back to the regular
+    // last/change when no extended price is available.
     bool  ext      = q.extended();
     float showPrice = ext ? q.extPrice     : q.last;
     float showPct   = ext ? q.extChangePct : q.changePct;
     if (isnan(showPct)) showPct = 0.0f;
     bool  up        = showPct >= 0;
-
-    if (r.after_icon) {
-      if (ext) lv_obj_remove_flag(r.after_icon, LV_OBJ_FLAG_HIDDEN);
-      else     lv_obj_add_flag   (r.after_icon, LV_OBJ_FLAG_HIDDEN);
-    }
 
     char buf[24];
     snprintf(buf, sizeof(buf), "%.2f", showPrice);
@@ -757,11 +711,11 @@ void tick() {
   auto quotes = g_store->snapshot();
   time_t lu = g_store->lastUpdate();
   if (g_favourites_dirty) {
-    // Wipe rows so the next rebuild_rows call rebuilds in the new order
-    // (the symbol set is the same — just the partition order changed).
+    // Wipe rows so the next rebuild_rows call rebuilds in the new order.
+    // The symbol set is the same — just the partition order changed — so
+    // keep the decoded-logo cache; the rebuilt rows remount from it.
     lv_obj_clean(g_list);
     g_rows.clear();
-    logos::clearRuntimeCache();
     g_favourites_dirty = false;
   }
   if (lu != lastSeen || g_rows.size() != quotes.size()) {

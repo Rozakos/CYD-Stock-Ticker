@@ -23,11 +23,15 @@ constexpr size_t MAX_RUNTIME_PNG_BYTES = 64 * 1024;
 // costs no heap). Embedded logos live in flash and don't count against this.
 constexpr size_t MAX_RUNTIME_LOGOS = 6;
 constexpr unsigned MAX_RUNTIME_LOGO_SIDE = 128;
-// Matches the size the API serves now (see fetcher's ?size=48). Caching
-// at the source resolution means the pngle callback writes pixels 1:1
-// into the slot and LVGL bilinearly scales 48→38 at draw time, the
-// same path the embedded logos take. No homebrew downscale.
-constexpr uint32_t RUNTIME_LOGO_CACHE_SIDE = 48;
+// 40, down from the API's native 48 (see fetcher's ?size=48): the largest
+// on-screen slot is the 38 px list logo, so a 40 px ARGB cache loses no
+// visible quality while cutting each resident bitmap from 9.2 KB to 6.4 KB.
+// That ~11 KB (at 4 symbols) is what lets the decoded-logo cache coexist
+// with the persistent TLS session's buffers on the no-PSRAM CYD — at 48 px
+// a TLS reconnect missed fitting its second 16.7 KB buffer by ~700 bytes.
+// The decoder's accumulator path handles the 48→40 downscale at decode
+// time; LVGL still bilinearly scales 40→38/32 at draw time.
+constexpr uint32_t RUNTIME_LOGO_CACHE_SIDE = 40;
 
 // Logo source-kind signatures (high byte = kind, low 24 bits = payload).
 // Shared by make()'s mounted-signature out-param and signature()'s probe so
@@ -46,7 +50,15 @@ constexpr uint32_t SIG_BADGE    = 0x03000000u;
 // shows meanwhile, the deferral raises g_decode_starved so the net task drops
 // the TLS session, and rebuild_logo's retry sweep mounts the real logo a few
 // seconds later — so a missing icon no longer needs a reboot.
-constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 48 * 1024;
+//
+// 40 KB, not 48: with NimBLE linked, the released BT controller RAM comes
+// back as fragmented sub-16 KB regions and the single big block tops out at
+// ~45 KB for the whole uptime (the first TLS carve + the row widgets split
+// the boot-time 94 KB block; releasing TLS only coalesces back to ~45 KB).
+// A 48 KB gate is therefore never satisfiable. 40 KB still covers the 32 KB
+// inflate window with margin; the small resident bitmaps land in the BT
+// fragments (TLSF good-fit), leaving the big block for the TLS handshake.
+constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 40 * 1024;
 
 bool runtimeDecodeAffordable() {
   return ESP.getMaxAllocHeap() >= RUNTIME_DECODE_MIN_MAXALLOC;
@@ -630,6 +642,57 @@ void clearRuntimeCache() {
   }
   g_runtime_cache.clear();
   log_i("[logo] runtime cache cleared");
+}
+
+void pruneRuntimeCache(const std::vector<String>& keep) {
+  size_t dropped = 0;
+  for (auto it = g_runtime_cache.begin(); it != g_runtime_cache.end();) {
+    bool wanted = false;
+    for (const auto& s : keep) {
+      if (it->symbol.equalsIgnoreCase(s)) {
+        wanted = true;
+        break;
+      }
+    }
+    if (wanted) {
+      ++it;
+    } else {
+      destroyRuntimeLogo(it->logo);
+      it = g_runtime_cache.erase(it);
+      ++dropped;
+    }
+  }
+  if (dropped) {
+    log_i("[logo] runtime cache pruned: %u dropped, %u kept",
+          (unsigned)dropped, (unsigned)g_runtime_cache.size());
+  }
+}
+
+void prewarmRuntimeCache(const std::vector<String>& symbols) {
+  size_t warmed = 0;
+  for (const auto& s : symbols) {
+    String up = s;
+    up.toUpperCase();
+    if (logos_data::find(up.c_str())) continue;   // embedded — no decode needed
+    String path = logoPath(up);
+    size_t bytes = 0;
+    {
+      fs_littlefs::Guard g;
+      if (!LittleFS.exists(path)) continue;       // not downloaded yet
+      File f = LittleFS.open(path, "r");
+      if (f) {
+        bytes = f.size();
+        f.close();
+      }
+    }
+    if (!bytes) continue;
+    bool capMiss = false;
+    if (cachedRuntimeLogo(up, path, bytes, &capMiss)) ++warmed;
+  }
+  if (warmed) {
+    log_i("[logo] prewarmed %u runtime logo(s) (maxalloc=%u)",
+          (unsigned)warmed, (unsigned)ESP.getMaxAllocHeap());
+  }
 }
 
 lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
