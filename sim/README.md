@@ -36,12 +36,17 @@ Flags:
 - `--symbol=AAPL` — symbol to show in detail mode.
 - `--out=path.png` — write a PNG snapshot after warmup (works in either mode).
 - `--ticks=N` — warmup frames before the snapshot (default 10).
+- `--click=X,Y` / `--longpress=X,Y` — inject a tap / long press after warmup
+  (long press holds 600 ms; LVGL's threshold is 400 ms).
+- `--intraday` — swap the seeded history for 1-minute-spaced intraday data
+  (exercises the HH:MM X-axis formatter).
 - `--data=path` — root directory for LittleFS read overlay + LVGL drive `L:`.
   Defaults to `../../data` (i.e. project root `data/`) which matches running
   from `sim/build/`.
 - `--web-settings=path` renders the same Rozakos-branded web admin HTML used
   by firmware `/settings` to a file, then exits. Open the generated HTML in a
-  browser to review the add/delete symbol table and settings form.
+  browser to review the settings form, symbol add/delete, and the Shares
+  (holdings) column.
 
 ## How it's wired
 
@@ -68,15 +73,21 @@ Flags:
   32 KB) via a CMake `-D` override. The shim has plenty of host DRAM
   and the firmware budget would crash the sim once both list and
   another screen are alive at once.
+- **Fake data previews the session-aware UI.** `fake_data::seed` marks NVDA
+  post-market and TSLA pre-market (`Quote::session`), so the list renders
+  the AFTER HOURS night palette + status-bar crescent out of the box, and
+  `sim_main` seeds sample holdings (AAPL ×10, NVDA ×2) once so the portfolio
+  total + day P/L readout shows in the bar's right slot. History responses
+  are stamped with the request generation (`HistoryRequest::gen`), matching
+  the firmware's silent-refresh contract.
 
 ## Known issues
 
-- **PNG logos don't render in the sim**; the letter-badge fallback
-  shows instead. The LVGL FS driver opens the PNG files (verified by
-  trace), and lodepng is linked, but the decoded image doesn't appear.
-  On-device logo rendering is unaffected. (TODO: diagnose; probably a
-  color-format or draw-buffer mismatch in our software-only flush
-  path.)
+- **Logos render via the in-memory ARGB path** (LovyanGFX pngle, same as
+  firmware) when a matching PNG exists under the `--data` overlay
+  (`<data>/logos/<SYMBOL>.png`). The project's `data/` is deliberately
+  near-empty, so out of the box every symbol shows the letter badge —
+  drop PNGs into a scratch dir and pass `--data=` to preview real logos.
 - **`list_screen::tick()` is only called when the list screen is
   active.** If we tick it while a different screen is current, the
   sim segfaults inside the row-rebuild path. Cause not yet root-caused

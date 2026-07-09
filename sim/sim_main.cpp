@@ -144,6 +144,11 @@ int main(int argc, char** argv) {
 
   styles::init();
   logos::prepareRuntimeDecoder();
+  // Mirror the firmware's boot flow: decode cached logo PNGs up front.
+  // On the host this is a no-op unless the --data overlay carries
+  // logos/<SYMBOL>.png files, but it keeps the prewarm/prune code paths
+  // exercised off-device.
+  logos::prewarmRuntimeCache(settings.symbols());
   settings_screen::init(&settings);
   list_screen::build(&store, &settings);
   logos::releaseRuntimeDecoder();
