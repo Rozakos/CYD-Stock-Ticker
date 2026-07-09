@@ -318,12 +318,12 @@
           <span>Device LVGL heap budget. The simulator overrides this upward.</span>
         </div>
         <div class="metric">
-          <strong>64&times;64</strong>
-          <span>Runtime logo PNGs land in LittleFS and decode to ARGB at source dims; LVGL scales at draw time.</span>
+          <strong>40&times;40</strong>
+          <span>Runtime logos decode once at boot (prewarm) into 6.4 KB ARGB bitmaps; LVGL scales at draw time.</span>
         </div>
         <div class="metric">
-          <strong>192 KB</strong>
-          <span>LittleFS partition; keep baked <code>data/</code> content tiny.</span>
+          <strong>896 KB</strong>
+          <span>LittleFS on the huge_app partition; keep baked <code>data/</code> content tiny.</span>
         </div>
       </aside>
     </header>
@@ -378,16 +378,16 @@
         <g filter="url(#soft-shadow)">
           <rect x="706" y="112" width="292" height="178" rx="10" fill="#2a2114" stroke="#f2b84b"></rect>
           <text x="730" y="145" fill="#f2b84b" font-size="16" font-weight="700">netTask - core 0</text>
-          <text x="730" y="174" fill="#edf3f7" font-size="14">WiFi, HTTPS, API polling</text>
-          <text x="730" y="199" fill="#9fb0bd" font-size="13">GET /stock/{symbol}</text>
+          <text x="730" y="174" fill="#edf3f7" font-size="14">WiFi, HTTPS, API polling, transport watchdog</text>
+          <text x="730" y="199" fill="#9fb0bd" font-size="13">GET /stocks?symbols=... (batch, market_state)</text>
           <text x="730" y="222" fill="#9fb0bd" font-size="13">GET /history/{symbol}?range=...</text>
-          <text x="730" y="245" fill="#9fb0bd" font-size="13">GET /logo/{symbol}</text>
+          <text x="730" y="245" fill="#9fb0bd" font-size="13">GET /logo/{symbol}?size=48</text>
 
           <rect x="706" y="354" width="292" height="142" rx="10" fill="#2a1d20" stroke="#f07178"></rect>
-          <text x="730" y="386" fill="#f07178" font-size="16" font-weight="700">Web Admin + Portal</text>
-          <text x="730" y="414" fill="#edf3f7" font-size="14">ESPAsyncWebServer</text>
-          <text x="730" y="438" fill="#9fb0bd" font-size="13">/settings for token, symbols, interval</text>
-          <text x="730" y="462" fill="#9fb0bd" font-size="13">CYD-Setup fallback AP onboarding</text>
+          <text x="730" y="386" fill="#f07178" font-size="16" font-weight="700">Web Admin + Provisioning</text>
+          <text x="730" y="414" fill="#edf3f7" font-size="14">ESPAsyncWebServer + mDNS + BLE</text>
+          <text x="730" y="438" fill="#9fb0bd" font-size="13">/settings: token, symbols, shares, interval</text>
+          <text x="730" y="462" fill="#9fb0bd" font-size="13">CYD-Setup AP + BLE GATT (unprovisioned only)</text>
         </g>
 
         <g filter="url(#soft-shadow)">
@@ -421,6 +421,8 @@
           <li><strong>Network task:</strong> owns STA/AP WiFi, HTTPS stock requests, runtime logo downloads, the captive portal, and the `/settings` web admin.</li>
           <li><strong>Stores:</strong> `QuoteStore` and `SettingsStore` provide mutex-protected handoff points so neither task reaches across the boundary directly.</li>
           <li><strong>LVGL invariant:</strong> `LV_OS_NONE` is deliberate. All LVGL access stays behind the project lock instead of LVGL's FreeRTOS OSAL.</li>
+          <li><strong>BLE invariant:</strong> NimBLE and mbedTLS cannot coexist in RAM — BLE provisioning runs only on unprovisioned boots, ends with a reboot, and provisioned boots release the BT controller's DRAM at startup.</li>
+          <li><strong>Transport watchdog:</strong> five consecutive fetch cycles with zero HTTP responses while WiFi is up means lwIP wedged — the net task reboots the device (server errors like 401 never trip it).</li>
         </ul>
       </section>
 
@@ -444,15 +446,15 @@
           </div>
           <div class="step">
             <b>2. Quotes</b>
-            <p>The network task fetches <code>/stock/{symbol}</code> with bearer auth and a non-empty User-Agent, then stores last price, change, and sparkline closes.</p>
+            <p>The network task batches <code>/stocks?symbols=...</code> with bearer auth, storing last price, change, sparkline closes, and the session (<code>market_state</code> + pre/post-market prints).</p>
           </div>
           <div class="step">
             <b>3. History</b>
-            <p>Detail range taps request <code>/history/{symbol}?range=1d|5d|1w|1mo|6mo</code>; generation checks drop stale responses.</p>
+            <p>Detail range taps request <code>/history/{symbol}?range=1d|1w|1mo|6mo|1y|5y|max</code>; generation checks drop stale responses, and the displayed range silently re-fetches on every quote refresh.</p>
           </div>
           <div class="step">
             <b>4. Render</b>
-            <p>The UI task snapshots the stores, draws list/detail screens, formats history, and uses cached logos or fallback badges.</p>
+            <p>The UI task snapshots the stores, draws list/detail screens with the session-aware status bar (title, sun/crescent, night palette, portfolio day P/L), and mounts prewarmed logos or fallback badges.</p>
           </div>
         </div>
       </section>
@@ -461,29 +463,35 @@
         <h2>Logo Pipeline</h2>
         <ul class="list">
           <li>Embedded logos come from <code>sim/logo_src/*.png</code> through <code>sim/build_logo_arrays.py</code> into <code>src/ui/logos_data.cpp</code>.</li>
-          <li>Missing logos are downloaded from <code>stock-api</code> as <code>/logos/&lt;SYMBOL&gt;.png</code> in LittleFS.</li>
-          <li>Runtime logos are decoded with LovyanGFX PNGLE, alpha-trimmed, resampled into transparent ARGB image buffers, and mounted through LVGL.</li>
-          <li>The PNG decoder is prepared for initial list construction and released afterward so TLS has enough contiguous DRAM for future HTTPS calls.</li>
+          <li>Missing logos are downloaded from <code>stock-api</code> (48&times;48 PNG) into LittleFS as <code>/logos/&lt;SYMBOL&gt;.png</code>.</li>
+          <li>Cached PNGs are decoded <strong>once at boot</strong> (<code>prewarmRuntimeCache</code>) — after the BT RAM release, before the first TLS connect, while the pristine contiguous heap block still exists — into 40&times;40 ARGB bitmaps that coexist with the TLS session.</li>
+          <li>Row rebuilds <em>prune</em> the decoded cache to the live symbol set (never a blanket clear), so prewarmed logos survive. Mid-run decodes are gated on contiguous heap and usually defer to a badge until the next reboot.</li>
         </ul>
       </section>
 
       <aside class="note span-5">
-        <h2>Storage Rule</h2>
+        <h2>Heap Rule</h2>
         <p>
-          <strong>Keep <code>data/</code> near-empty.</strong> The LittleFS partition is small,
-          and baked filesystem content competes with runtime-fetched logos and
-          settings. Source PNGs for embedded logos belong in <code>sim/logo_src/</code>, not
-          <code>data/logos/</code>.
+          <strong>The boot-time contiguous block is a one-shot resource.</strong>
+          After the first TLS connect and the row widgets carve it, the largest
+          free block plateaus around ~45 KB for the whole uptime. Anything that
+          needs a big contiguous allocation (logo decodes, the web-admin page
+          buffer) must either run before the first connect or be sized against
+          the measured steady state — watch the per-cycle
+          <code>[heap] pre-fetch free/largest</code> serial line. And keep
+          <code>data/</code> near-empty: source PNGs for embedded logos belong in
+          <code>sim/logo_src/</code>, not <code>data/logos/</code>.
         </p>
       </aside>
 
       <section class="card span-6">
         <h2>UI Surfaces</h2>
         <ul class="list">
-          <li><strong>List:</strong> rows show logo or badge, symbol, price, percent change, and sparkline.</li>
-          <li><strong>Detail:</strong> selected symbol, current price, range gain/loss, and an area-filled chart with range tabs.</li>
+          <li><strong>List:</strong> rows show logo or badge, symbol, price (extended-hours print during pre/post market), percent change, and sparkline; night palette outside regular hours.</li>
+          <li><strong>Status bar:</strong> session title (PREMARKET / MARKET OPEN / AFTER HOURS / MARKET CLOSED) with sun/crescent badge, plus portfolio total + day P/L, a stale-data warning, or the last-update clock.</li>
+          <li><strong>Detail:</strong> live extended-aware price, range gain/loss (1D vs previous close), and an area-filled chart with range tabs that auto-refreshes each quote cycle.</li>
           <li><strong>Settings screen:</strong> read-only device status with LAN URL for the web admin.</li>
-          <li><strong>Web admin:</strong> LAN form for token, refresh interval, and symbol add/delete.</li>
+          <li><strong>Web admin:</strong> LAN form for token, refresh interval, symbol add/delete, and shares owned per symbol; served from a pre-sized buffer with a heap-floor 503 guard.</li>
         </ul>
       </section>
 

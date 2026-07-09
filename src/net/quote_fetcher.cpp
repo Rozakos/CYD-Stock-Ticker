@@ -57,6 +57,10 @@ void abortApiRequest() {
   g_apiHttp.setReuse(true);
 }
 
+// Set whenever any request in the current fetch cycle gets a real HTTP
+// status back; cleared at the top of fetchQuotes. See header.
+bool g_sawHttpResponse = false;
+
 int startApiGet(const String& url, const String& token) {
   prepareApiTransport();
 
@@ -78,6 +82,7 @@ int startApiGet(const String& url, const String& token) {
 
     uint32_t started = millis();
     int code = g_apiHttp.GET();
+    if (code > 0) g_sawHttpResponse = true;   // server reachable (any status)
     log_i("[http] %s %s -> %d in %ums", reused ? "reuse" : "connect",
           url.c_str(), code, (unsigned)(millis() - started));
     if (!reused && code >= 0) {
@@ -372,6 +377,8 @@ void releaseApiConnection() {
   abortApiRequest();
 }
 
+bool sawHttpResponseThisCycle() { return g_sawHttpResponse; }
+
 // GET /stocks?symbols=A,B -> { quotes: [{symbol,last,change_pct,closes}, ...] }
 bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
   auto syms = settings.symbols();
@@ -386,6 +393,7 @@ bool fetchQuotes(SettingsStore& settings, QuoteStore& store) {
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                                    MALLOC_CAP_8BIT));
+  g_sawHttpResponse = false;   // per-cycle transport-liveness signal
 
   std::vector<Quote> out;
   out.reserve(syms.size());

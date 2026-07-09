@@ -127,6 +127,14 @@ void netTask(void*) {
   if (wifi_mgr::connected()) bringUpStaServices();
 
   uint32_t lastFetch = 0;
+  // Transport watchdog: consecutive fetch cycles in which not a single HTTP
+  // request got a server response (any status counts, even 401 — only pure
+  // transport death trips this). lwIP can wedge with the WiFi link still up
+  // (e.g. TCP PCB exhaustion after a burst of web-UI connections): inbound
+  // HTTP stops answering AND outbound connects time out, and it never
+  // self-heals. A clean reboot is the only reliable unwedge; boots are
+  // cheap (settings + logo cache persist, prewarm remounts the icons).
+  uint32_t deadFetchCycles = 0;
   for (;;) {
     captive_portal::loop();
 
@@ -165,6 +173,14 @@ void netTask(void*) {
           millis() - lastFetch > g_settings.refreshSeconds() * 1000UL) {
         if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
           lastFetch = millis();
+          if (fetcher::sawHttpResponseThisCycle()) {
+            deadFetchCycles = 0;
+          } else if (++deadFetchCycles >= 5) {
+            log_e("[net] no HTTP response for %u cycles with WiFi up — "
+                  "TCP stack wedged, restarting", (unsigned)deadFetchCycles);
+            delay(200);
+            ESP.restart();
+          }
         } else {
           lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 5000;
         }

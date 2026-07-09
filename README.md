@@ -211,6 +211,12 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
   ```
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
+  A momentary `503 busy` is normal if the request lands mid-quote-fetch (the
+  page needs a ~10 KB buffer the heap can't spare during TLS transients) —
+  refresh a second later. If the device stops answering entirely while WiFi
+  is up, the net task's transport watchdog reboots it automatically after
+  ~5 fetch cycles with no HTTP responses (lwIP can wedge its TCP stack after
+  a burst of connections; a reboot is the only reliable unwedge).
 - **Logos not showing**: check serial for `[logo]` download/cache/decode logs
   and confirm LittleFS has free space. The fallback badge always renders. A
   `runtime decode deferred (maxalloc=...)` line means the contiguous-heap gate

@@ -26,8 +26,32 @@ void save_symbols(const std::vector<String>& syms) {
                      web_admin_page::symbols_csv(syms));
 }
 
+// The settings page is built in one pre-sized response buffer.
+// RESPONSE_BUF: big enough for the whole page (~9 KB at a handful of
+// symbols) so the cbuf never grows — the default 1460-byte buffer grew by
+// realloc-and-copy on every write, transiently needing old+new at once,
+// which threw std::bad_alloc -> abort() on the tight steady-state heap.
+// HEAP_FLOOR: even the single upfront allocation can fail when a request
+// lands mid-quote-fetch (TLS/JSON transients dip the heap hard); operator
+// new's bad_alloc is uncatchable here (-fno-exceptions core), so refuse
+// politely with a 503 + Retry-After instead of rebooting the device.
+// Sized against the measured steady-state heap: with the TLS session and
+// logo cache resident the largest free block idles ~14-16 KB, so the buffer
+// (page is ~9 KB; grows ~350 B per symbol row) plus slack must stay under
+// that or the guard 503s every request. Revisit if the page outgrows 10 KB.
+constexpr size_t RESPONSE_BUF = 10 * 1024;
+constexpr size_t HEAP_FLOOR   = RESPONSE_BUF + 2 * 1024;  // + String churn
+
 void send_settings_page(AsyncWebServerRequest* req) {
-  AsyncResponseStream* response = req->beginResponseStream("text/html");
+  if (ESP.getMaxAllocHeap() < HEAP_FLOOR) {
+    AsyncWebServerResponse* busy =
+        req->beginResponse(503, "text/plain", "busy — refresh in a moment");
+    busy->addHeader("Retry-After", "2");
+    req->send(busy);
+    return;
+  }
+  AsyncResponseStream* response =
+      req->beginResponseStream("text/html", RESPONSE_BUF);
   web_admin_page::write_settings_page(*response, *g_settings);
   req->send(response);
 }

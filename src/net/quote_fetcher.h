@@ -19,6 +19,13 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
                   const String& symbol, const String& range,
                   uint32_t gen);
 
+// True when at least one HTTP request during the most recent fetchQuotes
+// cycle got a real server response (any status > 0, including 401/5xx).
+// False means every attempt died at the transport layer — the signal the
+// net task's watchdog uses to tell a wedged TCP stack (reboot-worthy) from
+// a server-side problem like a bad token (never reboot-worthy).
+bool sawHttpResponseThisCycle();
+
 // Drops the persistent API connection so its TLS buffers (~40 KB resident)
 // return to the heap. The net task calls this when the UI reports a runtime
 // logo decode was starved for contiguous heap (logos::consumeDecodeStarved);

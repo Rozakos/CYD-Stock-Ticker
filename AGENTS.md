@@ -337,6 +337,19 @@ PIO path on Windows: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
   `logos::prewarmRuntimeCache` (uiTask start) → first TLS connect (netTask).
   Reordering any of these re-breaks logos or quotes; verify on target with
   the `[heap]` serial line across several refresh cycles.
+- **AsyncResponseStream buffers the whole page in one contiguous cbuf** that
+  grows by realloc-and-copy; on this heap that aborted the device
+  (`std::bad_alloc` is uncatchable, `-fno-exceptions`). `/settings` is served
+  from a pre-sized 10 KB buffer behind a `HEAP_FLOOR` maxalloc guard that
+  503s instead of crashing. If the page grows past ~10 KB (roughly 8-9
+  symbol rows), bump `RESPONSE_BUF` — but re-check it against the measured
+  steady-state largest block first (see web_admin.cpp comment).
+- **lwIP can wedge with WiFi still associated** (TCP PCB exhaustion after a
+  connection burst): inbound HTTP dies AND outbound connects time out
+  forever. The netTask transport watchdog reboots after 5 consecutive fetch
+  cycles with zero HTTP responses (`fetcher::sawHttpResponseThisCycle` —
+  any status >0 counts, so a bad token 401-ing forever can never
+  reboot-loop the device).
 
 ## LVGL desktop simulator
 
@@ -365,6 +378,15 @@ One sim caveat worth knowing:
 logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
+
+- **Web-admin OOM crash fix + lwIP transport watchdog** (2026-07-09):
+  opening `/settings` aborted the device — AsyncResponseStream's cbuf grew
+  by realloc-and-copy past what the steady-state heap could hold. Now
+  served from a pre-sized 10 KB buffer behind a heap-floor 503 guard.
+  Separately, a burst of web connections wedged lwIP permanently (inbound
+  dead + outbound connect timeouts, WiFi still up); the net task now
+  reboots after 5 fetch cycles with zero HTTP responses. Verified: 8/8
+  page loads mid-session with quotes flowing, zero aborts.
 
 - **Runtime logos coexist with TLS; per-row moons removed** (2026-07-08,
   `0080e41`): logo decodes moved to a boot-time prewarm (pristine heap),
