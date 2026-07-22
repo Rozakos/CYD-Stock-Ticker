@@ -6,5 +6,8 @@
 src/secrets.h
 sim/build*/
 sim/sim_data/
+sim_data/
 .claude/
 monitor.log
+# Serial captures from capture_serial.ps1 — debugging scratch, not source.
+serial_*.log

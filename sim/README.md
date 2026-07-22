@@ -83,8 +83,8 @@ Flags:
 
 ## Known issues
 
-- **Logos render via the in-memory ARGB path** (LovyanGFX pngle, same as
-  firmware) when a matching PNG exists under the `--data` overlay
+- **Logos render via the in-memory ARGB path** (LVGL's bundled lodepng, same
+  as firmware) when a matching PNG exists under the `--data` overlay
   (`<data>/logos/<SYMBOL>.png`). The project's `data/` is deliberately
   near-empty, so out of the box every symbol shows the letter badge —
   drop PNGs into a scratch dir and pass `--data=` to preview real logos.

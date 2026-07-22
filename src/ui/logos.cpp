@@ -7,11 +7,18 @@
 #include <cstdlib>
 #include <vector>
 
-#include <lgfx/utility/lgfx_pngle.h>
-
 #include "../display/fs_littlefs.h"
 #include "logos_data.h"
 #include "styles.h"
+
+// LVGL's bundled lodepng (compiled in via LV_USE_LODEPNG in lv_conf.h).
+// Declared here rather than including its header so both the PlatformIO and
+// sim builds link it without caring where lvgl's src tree sits on the include
+// path. NOTE: this is LVGL's fork, whose out-param contract differs from
+// upstream lodepng — see the call site in decodeRuntimeLogo.
+extern "C" unsigned lodepng_decode32(unsigned char** out, unsigned* w,
+                                     unsigned* h, const unsigned char* in,
+                                     size_t insize);
 
 namespace {
 
@@ -21,7 +28,11 @@ constexpr size_t MAX_RUNTIME_PNG_BYTES = 64 * 1024;
 // session per fetch) exhausts the heap and aborts the firmware. Cap how many
 // we keep resident; symbols past the cap fall back to the letter badge (which
 // costs no heap). Embedded logos live in flash and don't count against this.
-constexpr size_t MAX_RUNTIME_LOGOS = 6;
+// 4, down from 6: each resident bitmap is a durable 6.4 KB heap tenant, and
+// past four of them the fragmentation reliably costs the TLS reconnect its
+// second 16.7 KB buffer (SSL -32512 loop → transport-watchdog reboot). The
+// web UI already tells users extra symbols fall back to lettered badges.
+constexpr size_t MAX_RUNTIME_LOGOS = 4;
 constexpr unsigned MAX_RUNTIME_LOGO_SIDE = 128;
 // 40, down from the API's native 48 (see fetcher's ?size=48): the largest
 // on-screen slot is the 38 px list logo, so a 40 px ARGB cache loses no
@@ -42,23 +53,30 @@ constexpr uint32_t SIG_EMBEDDED = 0x01000000u;
 constexpr uint32_t SIG_RUNTIME  = 0x02000000u;   // | (file bytes & 0xFFFFFF)
 constexpr uint32_t SIG_BADGE    = 0x03000000u;
 
-// A runtime PNG decode transiently needs pngle's ~32 KB inflate window plus a
-// ~9 KB pixel buffer. Running it while the net task's persistent TLS session
-// holds its ~40 KB can drive the largest contiguous block toward zero, which
-// both fails the decode AND (worse) starves LVGL's draw pool mid-redraw.
-// Skip the decode unless there is comfortable contiguous headroom; the badge
-// shows meanwhile, the deferral raises g_decode_starved so the net task drops
-// the TLS session, and rebuild_logo's retry sweep mounts the real logo a few
-// seconds later — so a missing icon no longer needs a reboot.
+// A runtime PNG decode transiently needs ~15 KB of small allocations: the
+// PNG file buffer (1–3 KB), lodepng's 48×48 RGBA output (9.2 KB) plus its
+// Huffman-tree transients, and the resident 40×40 pixel buffer (6.4 KB).
+// lodepng inflates straight into the output buffer — unlike the previous
+// pngle path, whose pngle_t was a single ~45 KB contiguous malloc (inline
+// 32 KB LZ dict + 11 KB inflator) that could never fit once the boot-time
+// heap block was carved up; that is what used to make mid-session logo
+// mounts impossible and forced a reboot for every newly added symbol.
 //
-// 40 KB, not 48: with NimBLE linked, the released BT controller RAM comes
-// back as fragmented sub-16 KB regions and the single big block tops out at
-// ~45 KB for the whole uptime (the first TLS carve + the row widgets split
-// the boot-time 94 KB block; releasing TLS only coalesces back to ~45 KB).
-// A 48 KB gate is therefore never satisfiable. 40 KB still covers the 32 KB
-// inflate window with margin; the small resident bitmaps land in the BT
-// fragments (TLSF good-fit), leaving the big block for the TLS handshake.
-constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 40 * 1024;
+// Still gate on contiguous headroom: decoding while the net task holds a
+// TLS request in flight can drive the largest block toward zero, which both
+// fails the decode AND (worse) starves LVGL's draw pool mid-redraw. On a
+// deferral the badge shows, g_decode_starved tells the net task to drop the
+// persistent TLS session, and rebuild_logo's retry sweep mounts the real
+// logo a few seconds later.
+//
+// 24 KB, because the decode's two big transients — the ~9.5 KB decompressed
+// scanlines and the 9.2 KB RGBA draw buf — are live at the same time, so a
+// single-largest-block gate must cover both plus slack. A 12 KB gate let
+// mid-fetch decodes start (largest ~16 KB), fail lodepng's second big alloc
+// (error 83), and retry into the same wall every 3 s forever — a badge that
+// never resolved plus visible row-rebuild flicker. Post-release the largest
+// block recovers to ~30 KB, so 24 KB is reliably reachable mid-session.
+constexpr size_t RUNTIME_DECODE_MIN_MAXALLOC = 24 * 1024;
 
 bool runtimeDecodeAffordable() {
   return ESP.getMaxAllocHeap() >= RUNTIME_DECODE_MIN_MAXALLOC;
@@ -117,8 +135,6 @@ void applyDarkLogoBackplate(lv_obj_t* img) {
   lv_obj_set_style_clip_corner(img, true, 0);
 }
 
-pngle_t* g_pngle = nullptr;
-
 struct RuntimeLogo {
   lv_image_dsc_t dsc;
   uint8_t* pixels;
@@ -137,28 +153,6 @@ struct PixelBounds {
   uint32_t y0;
   uint32_t x1;
   uint32_t y1;
-};
-
-enum class PngDecodePass : uint8_t {
-  Bounds,
-  Render,
-};
-
-struct PngDecodeCtx {
-  const uint8_t* png;
-  size_t pngSize;
-  size_t pos;
-  PngDecodePass pass;
-  uint32_t srcW;
-  uint32_t srcH;
-  PixelBounds bounds;
-  uint8_t* dst;
-  uint32_t dstSide;
-  uint32_t outW;
-  uint32_t outH;
-  uint32_t offX;
-  uint32_t offY;
-  uint16_t* accum;
 };
 
 String logoPath(const String& symbol) {
@@ -209,93 +203,13 @@ lv_obj_t* makeBadge(lv_obj_t* parent, const String& symbol, lv_coord_t size) {
   return badge;
 }
 
-uint32_t pngReadCb(void* userData, uint8_t* buf, uint32_t len) {
-  auto* ctx = static_cast<PngDecodeCtx*>(userData);
-  if (!ctx || !ctx->png) return 0;
-  size_t avail = ctx->pngSize - ctx->pos;
-  if (len > avail) len = (uint32_t)avail;
-  if (buf && len) {
-    memcpy(buf, ctx->png + ctx->pos, len);
-  }
-  ctx->pos += len;
-  return len;
-}
-
-void pngDrawCb(void* userData, uint32_t x, uint32_t y,
-               uint_fast8_t divX, size_t len, const uint8_t* argb) {
-  auto* ctx = static_cast<PngDecodeCtx*>(userData);
-  if (!ctx || !argb || !ctx->srcW || !ctx->srcH || y >= ctx->srcH) {
-    return;
-  }
-
-  for (size_t i = 0; i < len; ++i) {
-    uint32_t px = x + (uint32_t)i * divX;
-    if (px >= ctx->srcW) continue;
-
-    const uint8_t* in = argb + i * 4;
-    if (ctx->pass == PngDecodePass::Bounds) {
-      if (in[0] > 8) {
-        if (px < ctx->bounds.x0) ctx->bounds.x0 = px;
-        if (y < ctx->bounds.y0) ctx->bounds.y0 = y;
-        if (px + 1 > ctx->bounds.x1) ctx->bounds.x1 = px + 1;
-        if (y + 1 > ctx->bounds.y1) ctx->bounds.y1 = y + 1;
-      }
-      continue;
-    }
-
-    if (!ctx->dst || !ctx->dstSide || !ctx->outW || !ctx->outH ||
-        px < ctx->bounds.x0 || px >= ctx->bounds.x1 ||
-        y < ctx->bounds.y0 || y >= ctx->bounds.y1) {
-      continue;
-    }
-
-    uint32_t cropW = ctx->bounds.x1 - ctx->bounds.x0;
-    uint32_t cropH = ctx->bounds.y1 - ctx->bounds.y0;
-    uint32_t relX = px - ctx->bounds.x0;
-    uint32_t relY = y - ctx->bounds.y0;
-    if (ctx->accum) {
-      uint32_t dx = ctx->offX + (relX * ctx->outW) / cropW;
-      uint32_t dy = ctx->offY + (relY * ctx->outH) / cropH;
-      if (dx >= ctx->dstSide) dx = ctx->dstSide - 1;
-      if (dy >= ctx->dstSide) dy = ctx->dstSide - 1;
-      uint16_t* acc = ctx->accum + ((size_t)dy * ctx->dstSide + dx) * 5;
-      acc[0] += in[3];
-      acc[1] += in[2];
-      acc[2] += in[1];
-      acc[3] += in[0];
-      acc[4] += 1;
-    } else {
-      uint32_t dx0 = ctx->offX + (relX * ctx->outW) / cropW;
-      uint32_t dx1 = ctx->offX + ((relX + 1) * ctx->outW + cropW - 1) / cropW;
-      uint32_t dy0 = ctx->offY + (relY * ctx->outH) / cropH;
-      uint32_t dy1 = ctx->offY + ((relY + 1) * ctx->outH + cropH - 1) / cropH;
-      if (dx1 <= dx0) dx1 = dx0 + 1;
-      if (dy1 <= dy0) dy1 = dy0 + 1;
-      if (dx1 > ctx->dstSide) dx1 = ctx->dstSide;
-      if (dy1 > ctx->dstSide) dy1 = ctx->dstSide;
-
-      for (uint32_t yy = dy0; yy < dy1; ++yy) {
-        for (uint32_t xx = dx0; xx < dx1; ++xx) {
-          uint8_t* out = ctx->dst + ((size_t)yy * ctx->dstSide + xx) * 4;
-          // pngle emits A,R,G,B. LVGL ARGB8888 wants little-endian B,G,R,A.
-          out[0] = in[3];
-          out[1] = in[2];
-          out[2] = in[1];
-          out[3] = in[0];
-        }
-      }
-    }
-  }
-}
-
 uint8_t clampByte(float v) {
   if (v <= 0.0f) return 0;
   if (v >= 255.0f) return 255;
   return (uint8_t)(v + 0.5f);
 }
 
-PixelBounds opaqueBounds(const std::vector<uint8_t>& src, uint32_t srcW,
-                         uint32_t srcH) {
+PixelBounds opaqueBounds(const uint8_t* src, uint32_t srcW, uint32_t srcH) {
   PixelBounds b{srcW, srcH, 0, 0};
   for (uint32_t y = 0; y < srcH; ++y) {
     for (uint32_t x = 0; x < srcW; ++x) {
@@ -312,8 +226,8 @@ PixelBounds opaqueBounds(const std::vector<uint8_t>& src, uint32_t srcW,
   return b;
 }
 
-void samplePremulBgra(const std::vector<uint8_t>& src, uint32_t srcW,
-                      uint32_t srcH, float sx, float sy, float out[4]) {
+void samplePremulBgra(const uint8_t* src, uint32_t srcW, uint32_t srcH,
+                      float sx, float sy, float out[4]) {
   if (sx < 0.0f) sx = 0.0f;
   if (sy < 0.0f) sy = 0.0f;
   if (sx > (float)(srcW - 1)) sx = (float)(srcW - 1);
@@ -334,7 +248,7 @@ void samplePremulBgra(const std::vector<uint8_t>& src, uint32_t srcW,
     for (int xx = 0; xx < 2; ++xx) {
       float wx = xx ? fx : (1.0f - fx);
       float weight = wx * wy;
-      const uint8_t* p = src.data() + ((size_t)ys[yy] * srcW + xs[xx]) * 4;
+      const uint8_t* p = src + ((size_t)ys[yy] * srcW + xs[xx]) * 4;
       float a = (float)p[3] / 255.0f;
       out[0] += (float)p[0] * a * weight;
       out[1] += (float)p[1] * a * weight;
@@ -344,8 +258,8 @@ void samplePremulBgra(const std::vector<uint8_t>& src, uint32_t srcW,
   }
 }
 
-void resampleBgraFit(const std::vector<uint8_t>& src, uint32_t srcW,
-                     uint32_t srcH, uint8_t* dst, uint32_t dstSide) {
+void resampleBgraFit(const uint8_t* src, uint32_t srcW, uint32_t srcH,
+                     uint8_t* dst, uint32_t dstSide) {
   memset(dst, 0, (size_t)dstSide * dstSide * 4);
   PixelBounds b = opaqueBounds(src, srcW, srcH);
   uint32_t cropW = b.x1 - b.x0;
@@ -384,47 +298,14 @@ void resampleBgraFit(const std::vector<uint8_t>& src, uint32_t srcW,
   }
 }
 
-bool configureRenderBounds(PngDecodeCtx& ctx, uint32_t dstSide) {
-  if (ctx.bounds.x0 >= ctx.bounds.x1 || ctx.bounds.y0 >= ctx.bounds.y1) {
-    ctx.bounds = PixelBounds{0, 0, ctx.srcW, ctx.srcH};
-  }
-  uint32_t cropW = ctx.bounds.x1 - ctx.bounds.x0;
-  uint32_t cropH = ctx.bounds.y1 - ctx.bounds.y0;
-  if (!cropW || !cropH || !dstSide) return false;
-
-  float scaleX = (float)dstSide / (float)cropW;
-  float scaleY = (float)dstSide / (float)cropH;
-  float scale = (scaleX < scaleY) ? scaleX : scaleY;
-  ctx.outW = (uint32_t)((float)cropW * scale + 0.5f);
-  ctx.outH = (uint32_t)((float)cropH * scale + 0.5f);
-  if (ctx.outW < 1) ctx.outW = 1;
-  if (ctx.outH < 1) ctx.outH = 1;
-  if (ctx.outW > dstSide) ctx.outW = dstSide;
-  if (ctx.outH > dstSide) ctx.outH = dstSide;
-  ctx.offX = (dstSide - ctx.outW) / 2;
-  ctx.offY = (dstSide - ctx.outH) / 2;
-  ctx.dstSide = dstSide;
-  return true;
-}
-
-void resolveAccumulatedLogo(PngDecodeCtx& ctx) {
-  if (!ctx.accum || !ctx.dst || !ctx.dstSide) return;
-  for (uint32_t y = 0; y < ctx.dstSide; ++y) {
-    for (uint32_t x = 0; x < ctx.dstSide; ++x) {
-      uint16_t* acc = ctx.accum + ((size_t)y * ctx.dstSide + x) * 5;
-      uint16_t n = acc[4];
-      if (!n) continue;
-      uint8_t* out = ctx.dst + ((size_t)y * ctx.dstSide + x) * 4;
-      out[0] = (uint8_t)((acc[0] + n / 2) / n);
-      out[1] = (uint8_t)((acc[1] + n / 2) / n);
-      out[2] = (uint8_t)((acc[2] + n / 2) / n);
-      out[3] = (uint8_t)((acc[3] + n / 2) / n);
-    }
-  }
-}
-
+// `oom` (optional) reports whether a null return was caused by memory
+// pressure — the only failure kind the caller can cure by freeing heap
+// (dropping the TLS session) and retrying. Structural failures (bad file,
+// undecodable PNG, bad dims) leave it false so the caller doesn't churn.
 RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
-                               lv_coord_t targetSide, size_t* fileBytes) {
+                               lv_coord_t targetSide, size_t* fileBytes,
+                               bool* oom = nullptr) {
+  if (targetSide <= 0) return nullptr;
   uint8_t* png = nullptr;
   size_t bytes = 0;
   {
@@ -442,6 +323,7 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
     if (!png) {
       log_w("[logo] %s runtime png buffer alloc failed bytes=%u",
             symbol.c_str(), (unsigned)bytes);
+      if (oom) *oom = true;
       return nullptr;
     }
     size_t got = f.readBytes(reinterpret_cast<char*>(png), bytes);
@@ -454,53 +336,22 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
     }
   }
 
-  if (!logos::prepareRuntimeDecoder()) {
-    log_w("[logo] %s runtime pngle alloc failed", symbol.c_str());
-    std::free(png);
-    return nullptr;
-  }
-  pngle_t* pngle = g_pngle;
-
-  PngDecodeCtx ctx{png, bytes, 0, PngDecodePass::Bounds, 0, 0,
-                   PixelBounds{0, 0, 0, 0}, nullptr, 0, 0, 0, 0, 0, nullptr};
-  if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0) {
-    log_w("[logo] %s runtime prepare failed", symbol.c_str());
-    std::free(png);
-    return nullptr;
-  }
-  unsigned w = lgfx_pngle_get_width(pngle);
-  unsigned h = lgfx_pngle_get_height(pngle);
-  log_i("[logo] %s runtime source dims=%ux%u target=%ld",
-        symbol.c_str(), w, h, (long)targetSide);
-  if (w == 0 || h == 0 || targetSide <= 0) {
-    log_w("[logo] %s runtime invalid dims=%ux%u target=%ld",
-          symbol.c_str(), w, h, (long)targetSide);
-    std::free(png);
-    return nullptr;
-  }
-  if (w > MAX_RUNTIME_LOGO_SIDE || h > MAX_RUNTIME_LOGO_SIDE) {
-    log_w("[logo] %s runtime too large dims=%ux%u",
-          symbol.c_str(), w, h);
-    std::free(png);
-    return nullptr;
-  }
-
-  ctx.srcW = w;
-  ctx.srcH = h;
-  ctx.bounds = PixelBounds{w, h, 0, 0};
-  if (lgfx_pngle_decomp(pngle, pngDrawCb) < 0) {
-    log_w("[logo] %s runtime decomp failed dims=%ux%u",
-          symbol.c_str(), w, h);
-    std::free(png);
-    return nullptr;
-  }
-
+  // Allocate the RESIDENT pieces (descriptor + 40×40 pixel buffer) BEFORE
+  // the decode: TLSF good-fit places these ~6.5 KB into existing small
+  // fragments now, whereas after the decode transients have carved the big
+  // contiguous block they'd land in the middle of it — and once the
+  // transients free, that stranded resident buffer durably splits the block
+  // the next TLS reconnect needs (its second 16.7 KB buffer then misses and
+  // the transport watchdog ends up rebooting the device after every added
+  // symbol). Same ordering trick as the old boot-time esp_bt_mem_release
+  // comment: long-lived small allocations first, big transients second.
   uint32_t outSide = (uint32_t)targetSide;
   size_t pixelBytes = (size_t)outSide * (size_t)outSide * 4;
   auto* logo = static_cast<RuntimeLogo*>(std::calloc(1, sizeof(RuntimeLogo)));
   if (!logo) {
     log_w("[logo] %s runtime descriptor alloc failed", symbol.c_str());
     std::free(png);
+    if (oom) *oom = true;
     return nullptr;
   }
   logo->pixels = static_cast<uint8_t*>(std::malloc(pixelBytes));
@@ -509,44 +360,61 @@ RuntimeLogo* decodeRuntimeLogo(const String& symbol, const String& path,
           symbol.c_str(), (unsigned)pixelBytes);
     std::free(logo);
     std::free(png);
+    if (oom) *oom = true;
     return nullptr;
   }
-  memset(logo->pixels, 0, pixelBytes);
 
-  if (!configureRenderBounds(ctx, outSide)) {
-    log_w("[logo] %s runtime render bounds invalid", symbol.c_str());
-    destroyRuntimeLogo(logo);
-    std::free(png);
-    return nullptr;
-  }
-  ctx.pos = 0;
-  ctx.pass = PngDecodePass::Render;
-  ctx.dst = logo->pixels;
-  uint32_t cropW = ctx.bounds.x1 - ctx.bounds.x0;
-  uint32_t cropH = ctx.bounds.y1 - ctx.bounds.y0;
-  // Strict `>`: at source==dest (the common case now that the API
-  // serves 48x48 to match RUNTIME_LOGO_CACHE_SIDE) the draw callback's
-  // direct-write path does a clean 1:1 copy and the 23 KB accumulator
-  // isn't needed.
-  if (cropW > ctx.outW && cropH > ctx.outH) {
-    size_t accumBytes = (size_t)outSide * outSide * 5 * sizeof(uint16_t);
-    ctx.accum = static_cast<uint16_t*>(std::calloc(1, accumBytes));
-    if (!ctx.accum) {
-      log_w("[logo] %s runtime smooth buffer alloc failed bytes=%u",
-            symbol.c_str(), (unsigned)accumBytes);
-    }
-  }
-  if (lgfx_pngle_prepare(pngle, pngReadCb, &ctx) < 0 ||
-      lgfx_pngle_decomp(pngle, pngDrawCb) < 0) {
-    log_w("[logo] %s runtime render pass failed", symbol.c_str());
-    std::free(ctx.accum);
-    destroyRuntimeLogo(logo);
-    std::free(png);
-    return nullptr;
-  }
-  resolveAccumulatedLogo(ctx);
-  std::free(ctx.accum);
+  // lodepng converts any PNG color type to 8-bit RGBA. Its transients are
+  // several small allocations (largest: the w*h*4 output buffer), so this
+  // works in the fragmented mid-session heap where pngle's monolithic
+  // ~45 KB state never fit.
+  //
+  // CONTRACT (LVGL's lodepng fork, not upstream): *out is an lv_draw_buf_t*,
+  // NOT a raw pixel buffer. The pixels live at ->data in classic lodepng
+  // R,G,B,A order with stride 4*w, and the buffer must be released with
+  // lv_draw_buf_destroy. Treating the struct pointer as pixel data corrupts
+  // the heap ("assert failed: block_trim_free" boot loop).
+  lv_draw_buf_t* decoded = nullptr;
+  unsigned w = 0, h = 0;
+  unsigned err = lodepng_decode32(reinterpret_cast<unsigned char**>(&decoded),
+                                  &w, &h, png, bytes);
   std::free(png);
+  if (err) {
+    log_w("[logo] %s runtime lodepng error %u", symbol.c_str(), err);
+    if (decoded) lv_draw_buf_destroy(decoded);
+    destroyRuntimeLogo(logo);
+    // 83 is lodepng's own out-of-memory; everything else (bad IDAT,
+    // unsupported bit depth, …) won't get better on retry.
+    if (oom && err == 83) *oom = true;
+    return nullptr;
+  }
+  log_i("[logo] %s runtime source dims=%ux%u target=%ld",
+        symbol.c_str(), w, h, (long)targetSide);
+  if (!decoded || !decoded->data || w == 0 || h == 0 ||
+      w > MAX_RUNTIME_LOGO_SIDE || h > MAX_RUNTIME_LOGO_SIDE) {
+    log_w("[logo] %s runtime invalid dims=%ux%u target=%ld",
+          symbol.c_str(), w, h, (long)targetSide);
+    if (decoded) lv_draw_buf_destroy(decoded);
+    destroyRuntimeLogo(logo);
+    return nullptr;
+  }
+  uint8_t* rgba = decoded->data;
+
+  // lodepng emits R,G,B,A; LVGL ARGB8888 wants little-endian B,G,R,A. Swap
+  // R/B in place so the resampler reads and writes a single layout.
+  size_t npx = (size_t)w * (size_t)h;
+  for (size_t i = 0; i < npx; ++i) {
+    uint8_t* p = rgba + i * 4;
+    uint8_t r = p[0];
+    p[0] = p[2];
+    p[2] = r;
+  }
+
+  // Crop to the opaque bounds and bilinearly fit into the cache square —
+  // same visual contract as the old two-pass pngle decode (the resampler
+  // memsets the destination, so no pre-zero needed).
+  resampleBgraFit(rgba, w, h, logo->pixels, outSide);
+  lv_draw_buf_destroy(decoded);
 
   logo->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
   logo->dsc.header.cf = LV_COLOR_FORMAT_ARGB8888;
@@ -602,9 +470,20 @@ RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
     return nullptr;
   }
 
+  bool oom = false;
   RuntimeLogo* logo =
-      decodeRuntimeLogo(symbol, path, RUNTIME_LOGO_CACHE_SIDE, &bytes);
-  if (!logo) return nullptr;
+      decodeRuntimeLogo(symbol, path, RUNTIME_LOGO_CACHE_SIDE, &bytes, &oom);
+  if (!logo) {
+    // Raise the starved signal only when the decode failed for memory (the
+    // gate only sees the single largest block; lodepng error 83 needs two
+    // ~9.5 KB blocks at once) — the net task then drops the TLS session and
+    // the retry sweep succeeds a few seconds later. A structurally bad PNG
+    // must NOT raise it: that failure repeats identically every 3 s sweep,
+    // and dropping TLS for it would buy a full re-handshake per fetch cycle
+    // forever. The badge stays up instead.
+    if (oom) g_decode_starved.store(true, std::memory_order_relaxed);
+    return nullptr;
+  }
   g_runtime_cache.push_back(CachedLogo{symbol, sig, logo});
   return logo;
 }
@@ -613,23 +492,12 @@ RuntimeLogo* cachedRuntimeLogo(const String& symbol, const String& path,
 
 namespace logos {
 
-bool prepareRuntimeDecoder() {
-  if (g_pngle) return true;
-  g_pngle = lgfx_pngle_new();
-  if (g_pngle) {
-    log_i("[logo] runtime decoder ready");
-    return true;
-  }
-  log_w("[logo] runtime decoder alloc failed");
-  return false;
-}
+// lodepng allocates per decode and frees everything before returning, so
+// there is no persistent decoder state to prepare or release any more.
+// Kept as no-ops so callers (boot prewarm bracketing in main.cpp) stay valid.
+bool prepareRuntimeDecoder() { return true; }
 
-void releaseRuntimeDecoder() {
-  if (!g_pngle) return;
-  lgfx_pngle_destroy(g_pngle);
-  g_pngle = nullptr;
-  log_i("[logo] runtime decoder released");
-}
+void releaseRuntimeDecoder() {}
 
 bool consumeDecodeStarved() {
   return g_decode_starved.exchange(false, std::memory_order_relaxed);
@@ -740,7 +608,6 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
   if (exists) {
     log_i("[logo] %s runtime.decode.start %s (%u bytes)",
           up.c_str(), path.c_str(), (unsigned)bytes);
-    bool hadDecoder = (g_pngle != nullptr);
     bool capMiss = false;
     RuntimeLogo* rt = cachedRuntimeLogo(up, path, bytes, &capMiss);
     if (!rt) {
@@ -752,7 +619,6 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
       // later retry once heap frees up.
       log_w("[logo] %s runtime decode/cap miss %s bytes=%u — badge fallback",
             up.c_str(), path.c_str(), (unsigned)bytes);
-      if (!hadDecoder) releaseRuntimeDecoder();
       if (capMiss && mountedSig) {
         // Cache at capacity: retries can't succeed until rows are rebuilt, and
         // every path that frees slots (clearRuntimeCache) also rebuilds the
@@ -762,7 +628,6 @@ lv_obj_t* make(lv_obj_t* parent, const String& symbol, lv_coord_t size,
       }
       return makeBadge(parent, symbol, size);
     }
-    if (!hadDecoder) releaseRuntimeDecoder();
 
     lv_obj_t* img = lv_image_create(parent);
     lv_image_set_src(img, &rt->dsc);

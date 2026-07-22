@@ -33,6 +33,26 @@ static constexpr int MARKER_DOT_SIZE = 8;
 static constexpr int MARKER_TOP_BAND_PCT = 15;
 static constexpr int MARKER_OPA_TOP      = (LV_OPA_70);
 
+// --- Heap budget for opening the detail view --------------------------------
+// Measured on device: the widget tree built by build_once() (chart + spinner +
+// 7 range buttons + 11 tick labels + header) costs ~20 KB, the persistent TLS
+// session holds ~40 KB, and the whole heap once the list is up is ~69 KB. So
+// 40 + 20 leaves ~9 KB — and a failed malloc from there aborts inside newlib's
+// lazy lock init, which is the "tap a row, instant reboot, never reaches the
+// chart" symptom.
+//
+// Do NOT try to buy room by dropping the TLS session. It can only be
+// established at boot, when the largest free block is ~73 KB; mid-run the
+// largest block is capped around 32 KB and mbedTLS fails the handshake with
+// -32512 (SSL_ALLOC_FAILED) forever after. Dropping it costs quotes AND
+// history permanently and walks the device into the dead-fetch watchdog
+// reboot. The room comes from the list rows instead (see release_list_rows
+// below) — they are invisible while detail is up and cost nothing to rebuild.
+//
+// Hard floor: if even that leaves too little, refuse the open. Staying on the
+// list is a bad outcome; aborting into a reboot is a worse one.
+static constexpr uint32_t OPEN_MIN_FREE = 14 * 1024;
+
 // Range buttons. Button index -> API range token. The label seen on the
 // button is `g_range_labels[]`; the value sent in `?range=` is
 // `g_range_api[]`. Keep both arrays in lock-step.
@@ -85,6 +105,7 @@ uint32_t    g_wait_gen           = 0;
 bool        g_silent             = false;
 time_t      g_last_quote_seen    = 0;
 
+
 lv_obj_t* g_scr        = nullptr;
 lv_obj_t* g_card       = nullptr;
 lv_obj_t* g_header     = nullptr;
@@ -111,9 +132,42 @@ int32_t g_fill_x[CR_MAX_OUT];
 int32_t g_fill_y[CR_MAX_OUT];
 int32_t g_fill_bottom_y   = 0;
 
+// Tear the whole detail tree down and hand its ~9 KB back to the allocator.
+// Leaving it resident (which is what build_once's "build once, keep forever"
+// used to do) dropped steady-state free heap from ~21 KB to ~12 KB for the
+// rest of the boot — below netTask's starvation floor, so quotes stopped
+// updating permanently and the next allocation spike aborted.
+//
+// Runs from lv_async_call, never straight out of the back button's event
+// handler: lv_obj_delete walks the tree firing DELETE callbacks, and the
+// button we are dispatching from is inside that tree.
+void destroy_async(void*) {
+  lv_obj_t* scr = g_scr;
+  if (!scr) return;
+  // Clear every cached pointer BEFORE the delete, so a tick() or a queued
+  // event that lands mid-teardown cannot touch a half-freed widget.
+  g_scr = nullptr;
+  g_card = g_header = g_logo_slot = g_title = g_back_btn = nullptr;
+  g_price = g_change = g_btn_row = g_chart = g_spinner = g_err_label = nullptr;
+  g_marker_dot = nullptr;
+  g_ser = nullptr;
+  for (int j = 0; j < MAX_Y_TICKS; ++j)  g_y_labels[j]  = nullptr;
+  for (int k = 0; k < X_TICK_COUNT; ++k) g_x_labels[k]  = nullptr;
+  for (int i = 0; i < kNumRanges; ++i)   g_range_btns[i] = nullptr;
+  g_fill_n = 0;
+
+  lv_obj_delete(scr);
+  log_i("[ui] detail freed: heap free=%u largest=%u",
+        (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+}
+
 void on_back(lv_event_t*) {
-  g_active = false;
+  g_active   = false;
+  g_loading  = false;
+  g_rendered = false;
+  g_silent   = false;
   lv_screen_load(list_screen::screen());
+  lv_async_call(destroy_async, nullptr);
 }
 
 void start_history_fetch();   // forward decl — used by on_range_clicked
@@ -207,6 +261,8 @@ void chart_area_fill_cb(lv_event_t* e) {
 
 void build_once() {
   if (g_scr) return;
+  log_i("[ui] detail build: heap free=%u largest=%u",
+        (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   g_scr = lv_obj_create(nullptr);
   lv_obj_set_style_bg_color(g_scr, styles::bg_color(), 0);
   lv_obj_set_style_bg_opa(g_scr, LV_OPA_COVER, 0);
@@ -754,14 +810,11 @@ void render_history(const History& h) {
   lv_obj_set_pos(g_marker_dot, dot_x, dot_y);
 }
 
-}  // namespace
-
-namespace detail_screen {
-
-void show(QuoteStore* store, const String& symbol) {
-  g_store = store;
+void open_now(const String& symbol) {
   g_symbol = symbol;
   build_once();
+  log_i("[ui] detail built: heap free=%u largest=%u",
+        (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   rebuild_logo(symbol);
   lv_label_set_text(g_title, symbol.c_str());
   lv_label_set_text(g_price, "—");
@@ -781,11 +834,33 @@ void show(QuoteStore* store, const String& symbol) {
   g_first_load        = true;   // allow the sparkline fallback to fill the blank
   // Baseline for the silent auto-refresh: don't treat the refresh that was
   // already on screen when the user opened detail as "new data landed".
-  g_last_quote_seen   = store->lastUpdate();
+  g_last_quote_seen   = g_store->lastUpdate();
   apply_range_styles();
   g_active = true;
   start_history_fetch();
   lv_screen_load(g_scr);
+}
+
+}  // namespace
+
+namespace detail_screen {
+
+void show(QuoteStore* store, const String& symbol) {
+  g_store = store;
+  // The list's rows are about to be covered by this screen, so their widgets
+  // are dead weight for as long as detail is up. Free them BEFORE building —
+  // that is where the headroom for the ~20 KB detail tree comes from now that
+  // dropping the TLS session is off the table. list_screen::tick() rebuilds
+  // them from the store the moment detail closes.
+  list_screen::releaseRows();
+  if (ESP.getFreeHeap() < OPEN_MIN_FREE) {
+    log_e("[ui] detail open refused for %s: heap free=%u largest=%u below "
+          "floor — staying on the list rather than risking an OOM abort",
+          symbol.c_str(), (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
+    return;
+  }
+  open_now(symbol);
 }
 
 void tick() {

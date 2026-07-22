@@ -102,6 +102,14 @@ struct Row {
   // rebuild_logo only fires when it changes, so embedded/badge rows skip
   // the widget churn every refresh tick.
   uint32_t   logo_sig    = 0;
+  // Change-detection state so a refresh with identical data touches no
+  // widget at all — every touch invalidates its area and the resulting
+  // repaint is visible as flicker on the SPI panel. pct_dir mirrors which
+  // style set is on r.pct (0 = muted "—", 1 = up, 2 = down; make_row adds
+  // muted, so 0 matches a fresh row). spark_sig fingerprints the closes +
+  // direction that produced the current curve (0 = nothing plotted yet).
+  uint8_t    pct_dir     = 0;
+  uint32_t   spark_sig   = 0;
   String     symbol;
 };
 std::vector<Row> g_rows;
@@ -133,10 +141,15 @@ void spark_fill_cb(lv_event_t* e) {
                            SPARK_H - 1, r.accent, LV_OPA_50);
 }
 
-void open_detail_async(void* user_data) {
-  const char* sym = static_cast<const char*>(user_data);
-  if (!sym) return;
-  detail_screen::show(g_store, sym);
+// The tapped symbol, copied out of the row's heap string at click time. The
+// click handler cannot pass the row's own pointer through lv_async_call: a
+// rebuild_rows between the tap and the async dispatch frees it (on_row_delete
+// runs on obj destruction), and the async would then read freed memory.
+char g_pending_open_sym[12] = {0};
+
+void open_detail_async(void*) {
+  if (!g_pending_open_sym[0]) return;
+  detail_screen::show(g_store, g_pending_open_sym);
 }
 
 // Per-row long-press has to suppress the click that would otherwise fire
@@ -156,7 +169,8 @@ void on_row_click(lv_event_t* e) {
   }
   const char* sym = static_cast<const char*>(lv_event_get_user_data(e));
   if (!sym) return;
-  lv_async_call(open_detail_async, (void*)sym);
+  snprintf(g_pending_open_sym, sizeof(g_pending_open_sym), "%s", sym);
+  lv_async_call(open_detail_async, nullptr);
 }
 
 void on_row_long_press(lv_event_t* e) {
@@ -289,7 +303,30 @@ bool rebuild_logo(Row& r) {
   return r.logo_sig == want;
 }
 
+// lv_label_set_text invalidates (and so repaints) unconditionally, even
+// when the new text is identical — and rebuild_rows runs it for every row
+// on every quote refresh. Compare first.
+void set_text_if_changed(lv_obj_t* label, const char* txt) {
+  if (strcmp(lv_label_get_text(label), txt) != 0) {
+    lv_label_set_text(label, txt);
+  }
+}
+
 void update_spark(Row& r, const std::vector<float>& closes, bool up) {
+  // Fingerprint the inputs and bail when the curve wouldn't change: quote
+  // refreshes land every ~20 s but sparkline data moves far less often,
+  // and the unconditional set_points + invalidate repainted every row's
+  // spark area each cycle. up is folded in because it picks r.accent.
+  uint32_t sig = 2166136261u;
+  for (float v : closes) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    sig = (sig ^ bits) * 16777619u;
+  }
+  sig = (sig ^ (up ? 1u : 2u)) * 16777619u;
+  if (sig == r.spark_sig) return;
+  r.spark_sig = sig;
+
   if (closes.size() < 2) {
     r.spark_n = 0;
     lv_line_set_points(r.spark, r.spark_pts, 0);
@@ -445,12 +482,20 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
     const auto& q = quotes[i];
     Row& r = g_rows[i];
     if (!q.fresh) {
-      lv_label_set_text(r.price, "—");
-      lv_label_set_text(r.pct, "—");
-      lv_obj_remove_style(r.pct, &styles::pct_up, 0);
-      lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
-      lv_obj_add_style(r.pct, &styles::muted, 0);
-      lv_line_set_points(r.spark, r.spark_pts, 0);
+      set_text_if_changed(r.price, "—");
+      set_text_if_changed(r.pct, "—");
+      if (r.pct_dir != 0) {
+        r.pct_dir = 0;
+        lv_obj_remove_style(r.pct, &styles::pct_up, 0);
+        lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
+        lv_obj_add_style(r.pct, &styles::muted, 0);
+      }
+      if (r.spark_n != 0) {
+        r.spark_n   = 0;
+        r.spark_sig = 0;
+        lv_line_set_points(r.spark, r.spark_pts, 0);
+        lv_obj_invalidate(r.spark);
+      }
       continue;
     }
     // During extended hours the row headlines the pre/post-market print (the
@@ -466,21 +511,32 @@ void rebuild_rows(const std::vector<Quote>& quotes_in) {
 
     char buf[24];
     snprintf(buf, sizeof(buf), "%.2f", showPrice);
-    lv_label_set_text(r.price, buf);
+    set_text_if_changed(r.price, buf);
     snprintf(buf, sizeof(buf), "%s %+.2f%%",
              up ? LV_SYMBOL_UP : LV_SYMBOL_DOWN, showPct);
-    lv_label_set_text(r.pct, buf);
+    set_text_if_changed(r.pct, buf);
 
-    lv_obj_remove_style(r.pct, &styles::muted, 0);
-    lv_obj_remove_style(r.pct, &styles::pct_up, 0);
-    lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
-    lv_obj_add_style(r.pct, up ? &styles::pct_up : &styles::pct_dn, 0);
+    uint8_t dir = up ? 1 : 2;
+    if (r.pct_dir != dir) {
+      r.pct_dir = dir;
+      lv_obj_remove_style(r.pct, &styles::muted, 0);
+      lv_obj_remove_style(r.pct, &styles::pct_up, 0);
+      lv_obj_remove_style(r.pct, &styles::pct_dn, 0);
+      lv_obj_add_style(r.pct, up ? &styles::pct_up : &styles::pct_dn, 0);
+    }
     update_spark(r, q.sparkline, up);
   }
 }
 
 void refresh_wifi() {
-  if (WiFi.status() == WL_CONNECTED) {
+  // Runs on every 250 ms UI tick via update_status — rewriting the glyph
+  // each time invalidated the status bar four times a second. Only touch
+  // the label when the link state actually flips.
+  static int8_t shown = -1;
+  int8_t up = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
+  if (up == shown) return;
+  shown = up;
+  if (up) {
     // Just the signal glyph when connected — the dBm number was noise.
     lv_label_set_text(g_wifi_icon, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_color(g_wifi_icon, styles::up_color(), 0);
@@ -705,8 +761,27 @@ void build(QuoteStore* store, SettingsStore* settings) {
 
 lv_obj_t* screen() { return g_scr; }
 
+void releaseRows() {
+  if (!g_list || g_rows.empty()) return;
+  lv_obj_clean(g_list);
+  g_rows.clear();
+  // Leaving g_rows empty is what re-arms tick(): its rebuild condition
+  // compares g_rows.size() against the quote count, so the next pass with
+  // detail inactive rebuilds automatically. The decoded-logo cache is
+  // untouched, so the rebuild remounts icons without re-decoding.
+  log_i("[ui] list rows freed: heap free=%u largest=%u",
+        (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+}
+
 void tick() {
   if (!g_store) return;
+  // Nothing here is visible while the detail view is on top, and rebuild_rows
+  // deletes and recreates every row widget on each quote refresh. Doing that
+  // underneath the detail screen was pure allocator churn at exactly the
+  // moment heap is tightest (detail tree resident + a history fetch's TLS
+  // handshake in flight). Skip it; `lastSeen` stays put, so returning to the
+  // list rebuilds once with the latest quotes.
+  if (detail_screen::active()) return;
   static time_t lastSeen = 0;
   auto quotes = g_store->snapshot();
   time_t lu = g_store->lastUpdate();

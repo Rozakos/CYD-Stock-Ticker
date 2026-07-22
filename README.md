@@ -57,6 +57,15 @@ http://<device-ip>/settings
 No login is required; `/settings` opens directly on the LAN. The page uses the
 Rozakos Industries dark theme with the robot mark, wordmark, and footer.
 
+The page is rendered as a chunked HTTP response fed straight into AsyncTCP's
+buffer, so serving it needs no large contiguous allocation and works no matter
+how fragmented the heap is. `write_settings_page` is a linear, non-resumable
+writer, so each chunk re-runs it from the top and discards the bytes already
+sent — O(n²) in page size, but that's a handful of string-literal re-renders
+for a ~9 KB page and it costs zero heap. Keep the writer free of side effects
+(it runs several times per request) and prefer `Writer&` `print()` calls over
+building intermediate `String`s.
+
 The form lets you change:
 
 - Refresh interval in seconds (minimum 15)
@@ -87,8 +96,8 @@ still looks coherent without code changes.
 AMD is compiled in as an ARGB8888 array (lives in flash, costs no heap).
 For everything else the firmware fetches `GET /logo/{symbol}?size=48` on
 demand, caches the PNG in LittleFS (`/logos/<SYMBOL>.png`), and decodes it to
-an in-memory ARGB8888 image with pngle — the same render path the embedded
-logos use (LVGL's file-backed PNG path mis-draws on this panel). When no logo
+an in-memory ARGB8888 image with LVGL's bundled lodepng — the same render path
+the embedded logos use (LVGL's file-backed PNG path mis-draws on this panel). When no logo
 is available the widget draws a circular badge in the symbol's brand color
 with the first 1-2 letters.
 
@@ -99,7 +108,7 @@ retry every refresh cycle.
 
 Each runtime logo is held decoded in RAM (~6.4 KB at 40×40 ARGB), so to avoid
 heap exhaustion (and the reboots it caused) the firmware caps resident runtime
-logos at `MAX_RUNTIME_LOGOS` (6) and skips a logo download when the largest
+logos at `MAX_RUNTIME_LOGOS` (4) and skips a logo download when the largest
 free heap block is too small. Symbols past the cap show a letter badge (which
 costs no heap). For symbols you always want a real logo for, embed them at
 compile time (see below) — embedded logos live in flash and don't count against
@@ -211,9 +220,9 @@ LDR (GPIO 34) and RGB LED (GPIO 4/16/17) are not yet used.
   ```
 - **`/settings` not reachable**: the IP is printed at boot and on the settings
   info screen on-device. The device must be on the same LAN as your browser.
-  A momentary `503 busy` is normal if the request lands mid-quote-fetch (the
-  page needs a ~10 KB buffer the heap can't spare during TLS transients) —
-  refresh a second later. If the device stops answering entirely while WiFi
+  The page is streamed to the client in chunks, so it no longer needs a large
+  contiguous buffer and no longer returns `503 busy` on a fragmented heap.
+  If the device stops answering entirely while WiFi
   is up, the net task's transport watchdog reboots it automatically after
   ~5 fetch cycles with no HTTP responses (lwIP can wedge its TCP stack after
   a burst of connections; a reboot is the only reliable unwedge).

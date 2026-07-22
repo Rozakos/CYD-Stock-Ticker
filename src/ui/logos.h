@@ -7,12 +7,10 @@
 
 namespace logos {
 
-// Allocates the reusable runtime PNG decoder before UI widgets fragment the
-// heap. Runtime logos can still fall back to a badge if this fails.
+// No-ops since the lodepng switch: decodes allocate per call and free
+// everything before returning, so there is no persistent decoder state.
+// Kept so the boot prewarm bracketing in main.cpp stays source-compatible.
 bool prepareRuntimeDecoder();
-
-// Frees the reusable PNG decoder after cached runtime logos have been decoded.
-// The small ARGB logo cache remains available for future widget rebuilds.
 void releaseRuntimeDecoder();
 
 // Frees decoded runtime logos after their owning LVGL widgets have been
@@ -22,16 +20,13 @@ void clearRuntimeCache();
 // Drops cached runtime logos for symbols NOT in `keep` (case-insensitive)
 // and keeps the rest mounted-ready. Use this instead of clearRuntimeCache()
 // when rebuilding rows for a (possibly) changed symbol set: decoded logos
-// survive the rebuild, which matters because a mid-run re-decode needs a
-// ~45 KB contiguous block that rarely exists once TLS is up (the boot-time
-// prewarm below is usually the only decode that ever succeeds).
+// survive the rebuild, saving a ~15 KB re-decode per kept symbol.
 void pruneRuntimeCache(const std::vector<String>& keep);
 
 // Decodes every cached /logos/<SYMBOL>.png for `symbols` into the runtime
-// cache. Call at boot, between prepareRuntimeDecoder() and the first network
-// activity: the decode needs ~45 KB of contiguous heap transiently, which is
-// only reliably available before the TLS session and the row widgets carve
-// up the boot-time block. Later make() calls then hit the cache for free.
+// cache. Call at boot before the first network activity so the first row
+// build mounts logos from cache instead of decoding under load. (Since the
+// lodepng switch a mid-session decode works too — this just front-loads it.)
 void prewarmRuntimeCache(const std::vector<String>& symbols);
 
 // Creates a square logo for `symbol` sized `size` x `size`.

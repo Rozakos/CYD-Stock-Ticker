@@ -8,6 +8,7 @@
 
 #include <time.h>
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 #include "../config.h"
@@ -214,8 +215,14 @@ bool fetchLogo(const String& symbol, const String& token) {
   }
 
   // TLS is already resident in the persistent client. Keep enough contiguous
-  // space for the logo body buffer so quotes remain the priority under pressure.
-  if (ESP.getMaxAllocHeap() < 16000) {
+  // space for the logo body buffer so quotes remain the priority under
+  // pressure. 12 KB, not 16: the body buffer is sized from Content-Length
+  // (logos are 1–4 KB), and a fresh TLS reconnect leaves the largest block
+  // at ~15.3 KB — a 16 KB gate on that state skipped the download, released
+  // the connection to recover, reconnected next cycle back to ~15.3 KB, and
+  // looped forever (new symbols never got their logo; the 20 s reconnect
+  // churn also showed up as UI flicker).
+  if (ESP.getMaxAllocHeap() < 12000) {
     g_logoFetchStarved = true;
     log_w("[logo] %s skip download (low heap: free=%u maxblk=%u)",
           symbol.c_str(), (unsigned)ESP.getFreeHeap(),
@@ -247,7 +254,6 @@ bool fetchLogo(const String& symbol, const String& token) {
   // the body in RAM the guard is only held for the quick write + rename,
   // never during the network read.
   std::vector<uint8_t> body;
-  body.reserve(8192);
   static constexpr size_t kLogoMaxBytes = 65536;
 
   int expected = g_apiHttp.getSize();
@@ -256,6 +262,11 @@ bool fetchLogo(const String& symbol, const String& token) {
     abortApiRequest();
     return false;
   }
+  // Reserve exactly the announced size (1–4 KB in practice) instead of a
+  // pessimistic 8 KB: doubling-growth re-allocs are what transiently need
+  // old+new at once, and this keeps the download viable right after a TLS
+  // reconnect when the largest block is ~15 KB.
+  body.reserve((size_t)expected);
 
   WiFiClient* stream = g_apiHttp.getStreamPtr();
   uint8_t buf[512];

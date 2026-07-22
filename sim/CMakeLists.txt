@@ -35,8 +35,6 @@ add_executable(cyd_sim
     ${PROJECT_ROOT}/src/ui/detail_screen.cpp
     ${PROJECT_ROOT}/src/ui/settings_screen.cpp
     ${PROJECT_ROOT}/src/ui/wifi_setup_screen.cpp
-    ${LIBDEPS}/LovyanGFX/src/lgfx/utility/lgfx_miniz.c
-    ${LIBDEPS}/LovyanGFX/src/lgfx/utility/lgfx_pngle.c
     wifi_mgr_stub.cpp
 )
 

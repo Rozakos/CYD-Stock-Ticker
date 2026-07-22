@@ -171,7 +171,16 @@ void netTask(void*) {
       bringUpStaServices();
       if (lastFetch == 0 ||
           millis() - lastFetch > g_settings.refreshSeconds() * 1000UL) {
-        if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
+        // Never start HTTP/TLS work on a starved heap: a web-admin page
+        // render transiently takes ~20 KB, and driving lwIP into ENOMEM
+        // mid-request is what wedges its DNS client for good (heap
+        // recovers, DNS failures don't — only the watchdog reboot cleared
+        // it). The transient frees within seconds, so retry shortly.
+        if (ESP.getFreeHeap() < 12 * 1024 || ESP.getMaxAllocHeap() < 6 * 1024) {
+          log_w("[net] deferring fetch: heap starved (free=%u largest=%u)",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+          lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 3000;
+        } else if (fetcher::fetchQuotes(g_settings, g_quoteStore)) {
           lastFetch = millis();
           if (fetcher::sawHttpResponseThisCycle()) {
             deadFetchCycles = 0;
@@ -180,6 +189,15 @@ void netTask(void*) {
                   "TCP stack wedged, restarting", (unsigned)deadFetchCycles);
             delay(200);
             ESP.restart();
+          } else if (deadFetchCycles == 2) {
+            // Two dead cycles with WiFi up usually mean lwIP's DNS/UDP
+            // state wedged after an ENOMEM. Bounce the STA link — the
+            // re-associate + fresh DHCP lease re-seeds the resolver —
+            // instead of riding three more cycles into the reboot.
+            log_w("[net] %u dead fetch cycles — bouncing WiFi to reset "
+                  "DNS state", (unsigned)deadFetchCycles);
+            fetcher::releaseApiConnection();
+            WiFi.reconnect();
           }
         } else {
           lastFetch = millis() - (g_settings.refreshSeconds() * 1000UL) + 5000;
@@ -287,7 +305,12 @@ void setup() {
 
   g_lvglMu = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(uiTask,  "ui",  8192,  nullptr, 2, nullptr, 1);
+  // 12288, up from 8192: the lodepng switch moved runtime logo decodes onto
+  // this task (make()/prewarm), and lodepng keeps its decoder state on the
+  // caller's stack where pngle kept it on the heap. 8 KB left no margin
+  // under LVGL rendering + a decode — overflow presented as a silent UI
+  // freeze with netTask still fetching.
+  xTaskCreatePinnedToCore(uiTask,  "ui",  12288, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(netTask, "net", 12288, nullptr, 1, nullptr, 0);
 }
 

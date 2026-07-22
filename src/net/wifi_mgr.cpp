@@ -45,6 +45,10 @@ bool tryStaConnect(const String& ssid, const String& pass) {
   }
   bool ok = WiFi.status() == WL_CONNECTED;
   if (ok) {
+    // Cap TX power: bursts at the default 19.5 dBm sag the CYD's 3.3 V rail
+    // enough to shimmer the backlight in step with every fetch. 11 dBm is
+    // plenty for a same-room AP (we associate around -41 dBm RSSI).
+    WiFi.setTxPower(WIFI_POWER_11dBm);
     g_sta_status = StaStatus::Connected;
     log_i("[wifi] STA connected ip=%s rssi=%d",
           WiFi.localIP().toString().c_str(), WiFi.RSSI());

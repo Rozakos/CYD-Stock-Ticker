@@ -31,6 +31,12 @@ bool sawHttpResponseThisCycle();
 // logo decode was starved for contiguous heap (logos::consumeDecodeStarved);
 // the next fetch reconnects transparently. No-op when already disconnected.
 // Must be called from the net task — it owns the connection.
+//
+// Use sparingly: reconnecting needs ~33-35 KB contiguous, which mid-run is
+// often just out of reach (the largest free block idles ~18-21 KB), and a
+// lost reconnect takes quotes AND history down until the dead-fetch watchdog
+// reboots. Prefer reclaiming a widget tree that rebuilds locally — see
+// list_screen::releaseRows().
 void releaseApiConnection();
 
 // One-time cache invalidation. If the version stored in /logos/.cachever

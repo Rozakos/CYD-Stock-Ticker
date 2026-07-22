@@ -26,34 +26,75 @@ void save_symbols(const std::vector<String>& syms) {
                      web_admin_page::symbols_csv(syms));
 }
 
-// The settings page is built in one pre-sized response buffer.
-// RESPONSE_BUF: big enough for the whole page (~9 KB at a handful of
-// symbols) so the cbuf never grows — the default 1460-byte buffer grew by
-// realloc-and-copy on every write, transiently needing old+new at once,
-// which threw std::bad_alloc -> abort() on the tight steady-state heap.
-// HEAP_FLOOR: even the single upfront allocation can fail when a request
-// lands mid-quote-fetch (TLS/JSON transients dip the heap hard); operator
-// new's bad_alloc is uncatchable here (-fno-exceptions core), so refuse
-// politely with a 503 + Retry-After instead of rebooting the device.
-// Sized against the measured steady-state heap: with the TLS session and
-// logo cache resident the largest free block idles ~14-16 KB, so the buffer
-// (page is ~9 KB; grows ~350 B per symbol row) plus slack must stay under
-// that or the guard 503s every request. Revisit if the page outgrows 10 KB.
-constexpr size_t RESPONSE_BUF = 10 * 1024;
-constexpr size_t HEAP_FLOOR   = RESPONSE_BUF + 2 * 1024;  // + String churn
+// Feeds the settings page into AsyncTCP's own chunk buffer, so rendering it
+// needs no large contiguous allocation at all.
+//
+// This replaces a single pre-sized 10 KB response buffer guarded by a 12 KB
+// max-alloc floor. That floor was unmeetable in practice: once the list rows
+// and logo cache are resident the largest free block idles ~13-17 KB and dips
+// to ~9 KB after a few stock taps, so the page 503'd ("busy — refresh in a
+// moment") and, worse, tried to buy room by dropping the persistent TLS
+// session. That drop is a gamble — the handshake needs ~33-35 KB contiguous
+// to come back, which mid-run is usually just out of reach, and when it loses
+// quotes and history die until the dead-fetch watchdog reboots the device.
+// Chunking removes the need for the buffer, the floor and the gamble at once.
+//
+// write_settings_page is a linear writer, not resumable, so each chunk re-runs
+// it from the top and discards the bytes already sent. That is O(n^2) in page
+// size — but the page is ~9 KB against ~1.4 KB chunks, so it is roughly seven
+// re-renders of string literals on a 240 MHz core, and it costs zero heap.
+class ChunkWriter {
+ public:
+  ChunkWriter(uint8_t* out, size_t cap, size_t skip)
+      : out_(out), cap_(cap), skip_(skip) {}
+
+  // The three shapes write_settings_page actually uses. On ESP32 flash is
+  // memory-mapped, so PROGMEM literals and F() strings are plain reads.
+  void print(const char* s)                { write(s, strlen(s)); }
+  void print(const String& s)              { write(s.c_str(), s.length()); }
+  void print(const __FlashStringHelper* s) {
+    const char* p = reinterpret_cast<const char*>(s);
+    write(p, strlen(p));
+  }
+
+  size_t produced() const { return produced_; }
+
+ private:
+  void write(const char* data, size_t len) {
+    size_t off = 0;
+    if (seen_ < skip_) {                   // still before this chunk's window
+      size_t drop = skip_ - seen_;
+      if (drop >= len) { seen_ += len; return; }
+      off = drop;
+    }
+    if (produced_ < cap_) {                // room left in the chunk
+      size_t n = len - off;
+      if (n > cap_ - produced_) n = cap_ - produced_;
+      memcpy(out_ + produced_, data + off, n);
+      produced_ += n;
+    }
+    seen_ += len;                          // keep counting past a full chunk
+  }
+
+  uint8_t* out_;
+  size_t   cap_;
+  size_t   skip_;
+  size_t   produced_ = 0;   // bytes copied into this chunk
+  size_t   seen_     = 0;   // bytes the page writer has generated so far
+};
 
 void send_settings_page(AsyncWebServerRequest* req) {
-  if (ESP.getMaxAllocHeap() < HEAP_FLOOR) {
-    AsyncWebServerResponse* busy =
-        req->beginResponse(503, "text/plain", "busy — refresh in a moment");
-    busy->addHeader("Retry-After", "2");
-    req->send(busy);
-    return;
-  }
-  AsyncResponseStream* response =
-      req->beginResponseStream("text/html", RESPONSE_BUF);
-  web_admin_page::write_settings_page(*response, *g_settings);
-  req->send(response);
+  // `index` is how much of the body has already gone out, which is exactly
+  // the offset this chunk starts at. Returning 0 ends the response, which
+  // happens naturally once the cursor runs past the end of the page.
+  req->send(req->beginChunkedResponse(
+      "text/html",
+      [](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+        if (!buffer || maxLen == 0) return RESPONSE_TRY_AGAIN;
+        ChunkWriter w(buffer, maxLen, index);
+        web_admin_page::write_settings_page(w, *g_settings);
+        return w.produced();
+      }));
 }
 
 }  // namespace

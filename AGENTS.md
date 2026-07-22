@@ -84,7 +84,7 @@ is a self-hosted yfinance proxy at `https://rozakos.eu/stocks/api/v1`
 
 ## Memory budget (the part that bites)
 
-Last clean build: **RAM 29.9%**, **Flash 64.3%** (huge_app slot). Static DRAM
+Last clean build: **RAM 29.9%**, **Flash 64.2%** (huge_app slot). Static DRAM
 is the link-time constraint; runtime **heap** is the bigger operational
 constraint. Levers:
 
@@ -105,15 +105,21 @@ TLS connect (~45 KB) and the LVGL row widgets carve it, and after that the
 largest contiguous block plateaus around ~45 KB for the uptime (releasing
 the TLS session doesn't merge it back). Consequences, all load-bearing:
 
-- **Logo decodes happen at boot** (`logos::prewarmRuntimeCache` in uiTask,
-  after the BT release, before the first TLS connect). A decode transiently
-  needs pngle's ~32 KB inflate window + bitmap + PNG buffer concurrently —
-  mid-run that almost never fits. The affordability gate
-  (`RUNTIME_DECODE_MIN_MAXALLOC`) is 40 KB — the reachable ceiling, not 48.
+- **Logo decodes use LVGL's bundled lodepng** (pngle is gone). Its
+  transients are several small allocations (~15 KB working set, largest the
+  48×48 RGBA output), so mid-session decodes fit where pngle's monolithic
+  ~45 KB state never did. Boot prewarm (`logos::prewarmRuntimeCache` in
+  uiTask, after the BT release, before the first TLS connect) still runs —
+  it's free headroom — but is no longer the only window a decode can
+  succeed in. The affordability gate (`RUNTIME_DECODE_MIN_MAXALLOC`) is
+  24 KB: the two big transients (decompressed scanlines + RGBA draw buf)
+  are live at once, and a 12 KB gate let decodes start and then fail
+  lodepng's second alloc (error 83) in a 3 s retry loop.
 - **Resident logo bitmaps are 40×40 ARGB (6.4 KB each)**, cache-capped at
-  `MAX_RUNTIME_LOGOS=6`. At 48×48 (9.2 KB) a TLS reconnect missed fitting
-  its second 16.7 KB buffer by ~700 bytes. The largest on-screen slot is
-  38 px, so 40 px loses nothing visually.
+  `MAX_RUNTIME_LOGOS=4`. Past four resident bitmaps the fragmentation
+  reliably costs the TLS reconnect its second 16.7 KB buffer (SSL -32512
+  loop → transport-watchdog reboot); at 48×48 (9.2 KB) even fewer fit. The
+  largest on-screen slot is 38 px, so 40 px loses nothing visually.
 - **`rebuild_rows` prunes the logo cache (`pruneRuntimeCache`)** to the live
   symbol set instead of clearing it — a blanket `clearRuntimeCache` on the
   first build destroys the prewarmed logos right before they mount.
@@ -125,6 +131,45 @@ the TLS session doesn't merge it back). Consequences, all load-bearing:
   heap; a decode failure does **not** delete the cache file (deleting forced
   a re-download spiral). Don't undo any of this without a heap budget in
   hand and several on-target refresh cycles.
+
+### Screen trees are rented, not owned (2026-07-22, measured on device)
+
+Only one screen's widget tree is resident at a time. Both halves are
+load-bearing; dropping either one reintroduces a reboot:
+
+- **The detail tree costs ~12.1 KB** (chart + spinner + 7 range buttons +
+  11 tick labels + header; measured 12140/12104/12124/12136/12128 across five
+  opens). `build_once()` used to build it and never free it, so the first row
+  tap leaked it permanently, parked steady-state free heap at ~12 KB, and the
+  build spike raced the history fetch into an OOM `abort()` — the crash landed
+  in newlib's lazy lock init before `lv_screen_load` ever ran, so the device
+  rebooted without ever showing the chart. `destroy_async` now frees it on
+  back, via `lv_async_call` (deleting the tree from inside its own back
+  button's event handler is a use-after-free).
+- **`list_screen::releaseRows()` frees the row widgets on open** and
+  `list_screen::tick()` rebuilds them from the store on the way back (an empty
+  `g_rows` re-arms its own rebuild condition). That is where the headroom for
+  the detail tree comes from.
+- `list_screen::tick()` early-returns while `detail_screen::active()`. It
+  rebuilt every row on every quote refresh underneath the detail screen —
+  pure allocator churn at the tightest moment.
+
+### Do not spend the TLS session to buy heap (2026-07-22)
+
+The session holds ~40 KB and is the most tempting thing on a starved heap.
+Reconnecting needs **~33-35 KB contiguous**: measured failing at
+`largest=32756` and succeeding at `largest=34804`, against a mid-run largest
+block that idles ~18-21 KB and dips to ~7-9 KB just after a reconnect. So the
+release is a coin flip, and when it loses, quotes *and* history are dead until
+the dead-fetch watchdog reboots. Two callers learned this the hard way and
+both are gone; `logos::consumeDecodeStarved` is the one remaining caller,
+where a badge fallback is an acceptable consolation prize. Take headroom from
+a widget tree that rebuilds locally instead.
+
+Steady-state free heap **oscillates rather than leaks** — over a 180 s session
+of repeated detail opens and web-UI edits it read 29.0 / 27.4 / 24.4 / 22.3 /
+22.3 / **27.2** / 23.8 / 19.9 KB. Judge drift only from long captures; three
+samples is not a trend.
 
 ## Source layout
 
