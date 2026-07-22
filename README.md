@@ -12,7 +12,7 @@ Architecture overview: [`docs/firmware-architecture.html`](docs/firmware-archite
 ## UI tour
 
 - **List screen** — one row per symbol with the company logo (or a brand-colored letter badge), a 10-point sparkline, current price, and percent change with a colored up/down arrow. During pre/after-market the row headlines the extended-hours print and its change vs the regular close (Revolut-style). Auto-scrolls every 4 s when the list overflows. Outside regular hours the whole screen shifts to a purple-tinted night palette.
-- **Detail screen** — tap any row. Logo, large price (live, extended-hours-aware), percent change, and an area-filled trend chart with Y-axis price ticks, X-axis time/date ticks, and a current-price marker dot. A range selector (1D / 1W / 1M / 6M / 1Y / 5Y / Max) sits above the chart; **1D is the default and renders progressively** — the X axis spans the whole trading session and the line fills only the elapsed part of the day. 1D colors by day change vs the previous close (a gap-down day that climbs off the open still reads red); other ranges color first-to-last of the window. The displayed range silently re-fetches whenever a quote refresh lands, so the chart tracks the live session. A **back button** at the top-right returns to the list; tapping the chart does nothing.
+- **Detail screen** — tap any row. Logo, large price (live, extended-hours-aware), percent change, and an area-filled trend chart with Y-axis price ticks, X-axis time/date ticks, and a current-price marker dot. A range selector (1D / 1W / 1M / 6M / 1Y / 5Y / Max) sits above the chart; **1D is the default and renders progressively** — the X axis spans the whole **extended-hours window (04:00–20:00 ET)** with faint divider lines at the regular open/close, its four time ticks snapped to the window edges and those dividers, and the line fills only the elapsed part of the day. Before the regular session opens this shows the live pre-market move; without the extended window (older server) it falls back to the regular session alone. 1D colors by day change vs the previous close (a gap-down day that climbs off the open still reads red); other ranges color first-to-last of the window. The displayed range silently re-fetches whenever a quote refresh lands, so the chart tracks the live session. A **back button** at the top-right returns to the list; tapping the chart does nothing.
 - **Status bar** — wifi indicator (green glyph when connected, red "no link" otherwise; tap it to forget the network and reboot into WiFi setup); a session-aware center title (PREMARKET / MARKET OPEN / AFTER HOURS / MARKET CLOSED from the API's `market_state`, with an amber sun disc while open and a crescent moon otherwise; static "MARKETS" fallback when the API omits the field); the right slot shows the portfolio total with day P/L when share quantities are configured (green/red, extended-hours-aware vs previous close), an amber "stale Ns" warning when no refresh lands for two intervals (+5 s), or the last-update HH:MM:SS clock otherwise; and a gear icon that opens the settings screen.
 - **Settings screen** — tap the gear. Read-only view of network state (SSID, IP, signal), refresh interval, symbols, and API-key status, plus the `http://<ip>/` URL to open the editable web admin. A **back button** at the top-right returns to the list.
 - **WiFi setup screen** — shown on first boot (or when no saved network connects): a QR code to join the device's setup AP plus a captive-portal page to enter credentials. Live status (Connecting… / Connected / failure reason) is shown on-device so no serial console is needed. Unprovisioned boots also advertise a BLE GATT provisioning service (`CYD-Ticker-XXXX`) for the Rozakos Home app — see `docs/ble-provisioning-protocol.md`. Once provisioning succeeds the device reboots into ticker mode; provisioned boots never start BLE (NimBLE's RAM footprint starves the TLS client — see AGENTS.md) and are discoverable over mDNS instead (`cyd-ticker-xxxx.local`, `_rozakos._tcp`, plus `GET /api/device-info`).
@@ -145,9 +145,15 @@ Base URL: `https://rozakos.eu/stocks/api/v1`. Both calls send
   carries `interval` (`intraday`|`daily`) and `points[]` of `{ts, last}`
   (epoch seconds UTC); the firmware downsamples to `HISTORY_POINTS`,
   preserving the first/last point so the displayed % change matches the
-  window. For `range=1d` the response should also include
-  `session_open`/`session_close` (epoch s) so the chart spans the full
-  trading session; without them the firmware assumes a 6.5 h session. The
+  window. `range=1d` is sent with `&prepost=1`, which widens the response to
+  the 04:00–20:00 ET window and adds `window_open`/`window_close` (epoch s,
+  the X-axis bounds), `prev_close` (day-change baseline for the header) and
+  `market_state`. `session_open`/`session_close` (epoch s) remain the regular
+  open/close and become the divider lines inside that window. Without the
+  window fields the chart spans the regular session alone; without either the
+  firmware assumes a 6.5 h session. Sending `prepost=1` matters beyond the
+  wider axis: before the regular session opens there is no REGULAR data for
+  today, so the plain call returns **yesterday's** session instead. The
   server must apply `limit` for **all** ranges (notably `max`) so the payload
   stays small enough for the ESP32 to parse. Requires server Postgres history
   (`DATABASE_URL`); otherwise 503.

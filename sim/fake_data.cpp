@@ -1,5 +1,6 @@
 #include "fake_data.h"
 
+#include <cstring>
 #include <ctime>
 #include <vector>
 
@@ -32,8 +33,36 @@ void set_history(QuoteStore& store, const char* symbol, const char* interval,
   time_t now = std::time(nullptr);
   int n = (int)h.closes.size();
   h.timestamps.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    h.timestamps.push_back(now - (time_t)(n - 1 - i) * step_s);
+  if (range && std::strcmp(range, "1d") == 0) {
+    // Mirror what the API returns for range=1d&prepost=1: an extended-hours
+    // window (04:00-20:00 local here, ET on the device) with the regular
+    // session inside it, so the sim exercises the divider lines and the
+    // 4-tick snapped X axis rather than the old open/mid/close layout.
+    std::tm lt = *std::localtime(&now);
+    lt.tm_hour = 0; lt.tm_min = 0; lt.tm_sec = 0;
+    time_t midnight = std::mktime(&lt);
+    h.window_open   = midnight +  4 * 3600;
+    h.window_close  = midnight + 20 * 3600;
+    h.session_open  = midnight +  9 * 3600 + 1800;
+    h.session_close = midnight + 16 * 3600;
+    h.prev_close    = h.closes.empty() ? NAN : h.closes.front() - 1.5f;
+    h.market_state  = "REGULAR";
+    // Spread the points from the window open up to "now", ignoring step_s:
+    // that reproduces the real progressive fill (the server only returns
+    // elapsed data), so the sim shows whatever fraction of the day has
+    // actually passed instead of an 11-minute sliver at the left edge.
+    time_t last = now;
+    if (last < h.window_open + 900)  last = h.window_open + 900;   // pre-open
+    if (last > h.window_close)       last = h.window_close;        // after 20:00
+    for (int i = 0; i < n; ++i) {
+      h.timestamps.push_back(
+          h.window_open +
+          (time_t)((long long)(last - h.window_open) * i / (n > 1 ? n - 1 : 1)));
+    }
+  } else {
+    for (int i = 0; i < n; ++i) {
+      h.timestamps.push_back(now - (time_t)(n - 1 - i) * step_s);
+    }
   }
   store.setHistory(std::move(h));
   store.setHistoryError(false);

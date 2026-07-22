@@ -188,10 +188,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[sim] inject %s at %d,%d (hold=%d ms)\n",
                  label, cx, cy, hold_ms);
     sim_bridge::inject_click(cx, cy, hold_ms);
-    for (int i = 0; i < 5; ++i) {
+    // Give the post-click chain time to settle (LVGL dispatch -> history
+    // request -> service_sim_history -> render) instead of screenshotting
+    // mid-flight. NOTE: a range-button click still only reaches the spinner —
+    // the re-fetch its result depends on is not being answered in headless
+    // mode, so range switching remains unverifiable here. Unrelated to the
+    // tick count; more passes do not help.
+    for (int i = 0; i < 40; ++i) {
       service_sim_history(store);
       tick_active_screen();
       sim_bridge::tick();
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   };
 

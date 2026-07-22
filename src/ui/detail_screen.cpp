@@ -24,7 +24,12 @@ static constexpr int CARD_H      = cfg::SCREEN_H - 16 - CARD_Y;              // 
 static constexpr int CHART_W     = cfg::SCREEN_W - 32;                        // 288
 static constexpr int CHART_H     = CARD_H - 16;                               // 144
 static constexpr int MAX_Y_TICKS = 8;
-static constexpr int X_TICK_COUNT = 3;
+// Label pool size. Non-1D ranges use 3 evenly-spaced ticks; the extended-hours
+// 1D view uses 4, snapped to the window edges and the two session dividers
+// (04:00 / 09:30 / 16:00 / 20:00 ET) so the divider lines are self-labelling.
+// Extra slots are hidden rather than deleted.
+static constexpr int X_TICK_COUNT   = 4;
+static constexpr int X_TICKS_PLAIN  = 3;
 static constexpr int CR_FACTOR    = 5;
 static constexpr int CR_MAX_OUT   = (cfg::HISTORY_POINTS - 1) * CR_FACTOR + 1;
 static constexpr int MARKER_DOT_SIZE = 8;
@@ -131,6 +136,11 @@ int     g_fill_n          = 0;
 int32_t g_fill_x[CR_MAX_OUT];
 int32_t g_fill_y[CR_MAX_OUT];
 int32_t g_fill_bottom_y   = 0;
+// Regular open/close divider lines for the extended-hours 1D view, in
+// chart-local X. -1 = not drawn (any non-1D range, or a server that gave us
+// no window bounds). Drawn in the same callback as the area fill, so they
+// cost no widgets and no heap.
+int32_t g_divider_x[2]    = {-1, -1};
 
 // Tear the whole detail tree down and hand its ~9 KB back to the allocator.
 // Leaving it resident (which is what build_once's "build once, keep forever"
@@ -155,6 +165,7 @@ void destroy_async(void*) {
   for (int k = 0; k < X_TICK_COUNT; ++k) g_x_labels[k]  = nullptr;
   for (int i = 0; i < kNumRanges; ++i)   g_range_btns[i] = nullptr;
   g_fill_n = 0;
+  g_divider_x[0] = g_divider_x[1] = -1;
 
   lv_obj_delete(scr);
   log_i("[ui] detail freed: heap free=%u largest=%u",
@@ -224,6 +235,14 @@ void start_history_fetch() {
   // network round-trip lands. The marker/fill go with it (stale geometry).
   lv_chart_set_all_value(g_chart, g_ser, LV_CHART_POINT_NONE);
   g_fill_n = 0;
+  g_divider_x[0] = g_divider_x[1] = -1;
+  // Hide the time axis too: the labels describe the window we just blanked,
+  // and leaving them up means a 1D->longer-range switch shows session times
+  // under an empty chart (and strands 1D's 4th tick, which the 3-tick ranges
+  // never overwrite).
+  for (int k = 0; k < X_TICK_COUNT; ++k) {
+    if (g_x_labels[k]) lv_obj_add_flag(g_x_labels[k], LV_OBJ_FLAG_HIDDEN);
+  }
   if (g_marker_dot) lv_obj_add_flag(g_marker_dot, LV_OBJ_FLAG_HIDDEN);
   if (g_err_label)  lv_obj_add_flag(g_err_label,  LV_OBJ_FLAG_HIDDEN);
   if (g_spinner) {
@@ -244,7 +263,6 @@ void start_history_fetch() {
 // Drawn on LV_EVENT_DRAW_MAIN_BEGIN so the chart's line renders on top.
 void chart_area_fill_cb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_DRAW_MAIN_BEGIN) return;
-  if (g_fill_n < 2) return;
 
   lv_obj_t* chart = (lv_obj_t*)lv_event_get_target(e);
   if (!chart) return;
@@ -254,6 +272,24 @@ void chart_area_fill_cb(lv_event_t* e) {
 
   lv_area_t obj_coords;
   lv_obj_get_coords(chart, &obj_coords);
+
+  // Session dividers first, so the area fill and the line both sit on top of
+  // them — they are background furniture, not data.
+  for (int i = 0; i < 2; ++i) {
+    if (g_divider_x[i] < 0) continue;
+    lv_draw_line_dsc_t d;
+    lv_draw_line_dsc_init(&d);
+    d.color = lv_color_hex(0x8fa3bf);
+    d.opa   = LV_OPA_30;
+    d.width = 1;
+    d.p1.x  = obj_coords.x1 + g_divider_x[i];
+    d.p1.y  = obj_coords.y1;
+    d.p2.x  = obj_coords.x1 + g_divider_x[i];
+    d.p2.y  = obj_coords.y1 + g_fill_bottom_y;
+    lv_draw_line(layer, &d);
+  }
+
+  if (g_fill_n < 2) return;
   util::draw_polyline_fill(layer, g_fill_x, g_fill_y, g_fill_n,
                            obj_coords.x1, obj_coords.y1,
                            g_fill_bottom_y, g_line_color, MARKER_OPA_TOP);
@@ -554,32 +590,49 @@ void render_history(const History& h) {
   float span = hi_snap - lo_snap;
   if (span <= 0.0f) span = 1.0f;
 
-  // Progressive 1D: the X axis represents the WHOLE trading session
-  // [session_open, session_close] as a fixed window, and the line fills only
-  // the elapsed-so-far left portion (Revolut-style). We spread the chart over
-  // `total_slots` evenly across the full session, put the resampled data in
-  // the first `active_n` (= elapsed fraction) slots, and leave the rest
+  // Progressive 1D: the X axis represents a FIXED time window and the line
+  // fills only the elapsed-so-far left portion (Revolut-style). We spread the
+  // chart over `total_slots` evenly across that window, put the resampled data
+  // in the first `active_n` (= elapsed fraction) slots, and leave the rest
   // LV_CHART_POINT_NONE so the line simply stops at "now".
+  //
+  // The window is the extended-hours span (04:00-20:00 ET) when the server
+  // supplies it, with the regular open/close drawn as dividers inside it.
+  // Falling back to the regular session alone keeps older servers working.
   //
   // Every other range fills the whole width: total_slots == active_n == out_n.
   bool   progressive = (h.range == "1d");
   static float slot_val[CR_MAX_OUT];
   int    total_slots, active_n;
-  time_t sess_open = 0, sess_close = 0;
+  time_t win_open = 0, win_close = 0;      // X-axis bounds
+  time_t sess_open = 0, sess_close = 0;    // divider positions (0 = none)
   if (progressive) {
-    sess_open  = h.session_open;
-    sess_close = h.session_close;
     time_t first_ts = h.timestamps.empty() ? 0 : h.timestamps.front();
     time_t last_ts  = h.timestamps.empty() ? 0 : h.timestamps.back();
-    // Fallback when the API hasn't supplied session bounds: assume a 6.5h
-    // regular session beginning at the first data point.
-    if (sess_open <= 0 || sess_close <= sess_open) {
-      sess_open  = first_ts > 0 ? first_ts : last_ts;
-      sess_close = sess_open + (time_t)23400;   // 6.5h regular US session
+    win_open  = h.window_open;
+    win_close = h.window_close;
+    if (win_open > 0 && win_close > win_open) {
+      // Extended window: the regular bounds become dividers, but only when
+      // they actually fall inside it.
+      if (h.session_open  > win_open && h.session_open  < win_close)
+        sess_open = h.session_open;
+      if (h.session_close > win_open && h.session_close < win_close)
+        sess_close = h.session_close;
+    } else {
+      // No window from the server — axis spans the regular session as before,
+      // and there is nothing to divide.
+      win_open  = h.session_open;
+      win_close = h.session_close;
+    }
+    // Last-resort fallback: assume a 6.5h regular session from the first point.
+    if (win_open <= 0 || win_close <= win_open) {
+      win_open  = first_ts > 0 ? first_ts : last_ts;
+      win_close = win_open + (time_t)23400;   // 6.5h regular US session
+      sess_open = sess_close = 0;
     }
     float frac = 1.0f;
-    if (sess_close > sess_open && last_ts > 0) {
-      frac = (float)(last_ts - sess_open) / (float)(sess_close - sess_open);
+    if (win_close > win_open && last_ts > 0) {
+      frac = (float)(last_ts - win_open) / (float)(win_close - win_open);
     }
     if (frac < 0.02f) frac = 0.02f;   // always show at least a sliver
     if (frac > 1.0f)  frac = 1.0f;
@@ -631,6 +684,20 @@ void render_history(const History& h) {
     g_fill_y[i] = y;
   }
 
+  // Divider positions, in the same chart-local X space as the fill. Mapped
+  // from wall-clock into the window rather than from slot indices, so they
+  // stay put as the elapsed portion grows through the day.
+  g_divider_x[0] = g_divider_x[1] = -1;
+  if (progressive && win_close > win_open) {
+    const time_t win_span = win_close - win_open;
+    const time_t marks[2] = { sess_open, sess_close };
+    for (int i = 0; i < 2; ++i) {
+      if (marks[i] <= win_open || marks[i] >= win_close) continue;
+      g_divider_x[i] =
+          (int32_t)((long long)plot_w * (marks[i] - win_open) / win_span);
+    }
+  }
+
   lv_chart_refresh(g_chart);
 
   float last  = h.closes.back();
@@ -642,10 +709,8 @@ void render_history(const History& h) {
 
   // The detail header reflects the selected chart window: every longer
   // range shows gain/loss from this history's first point to its last.
-  // 1D is the exception: like the list rows it compares against the
-  // previous session close (derived from the live quote — the history feed
-  // has no prev_close), so a gap-down day that climbs off the open still
-  // reads red.
+  // 1D is the exception: like the list rows it compares against the previous
+  // session close, so a gap-down day that climbs off the open still reads red.
   Quote live;
   bool have_live = false;
   for (const auto& q : g_store->snapshot()) {
@@ -656,10 +721,16 @@ void render_history(const History& h) {
     }
   }
   float change = chart_change;
-  if (progressive && have_live && !isnan(live.changePct) &&
-      live.changePct > -100.0f) {
-    float prev_close = live.last / (1.0f + live.changePct / 100.0f);
-    if (prev_close > 0.0f) {
+  if (progressive) {
+    // Prefer the API's prev_close. The old path back-derived it from the live
+    // quote (last / (1 + changePct/100)), which compounded that percentage's
+    // rounding — and silently produced nothing when no fresh quote was around.
+    float prev_close = h.prev_close;
+    if (isnan(prev_close) && have_live && !isnan(live.changePct) &&
+        live.changePct > -100.0f) {
+      prev_close = live.last / (1.0f + live.changePct / 100.0f);
+    }
+    if (!isnan(prev_close) && prev_close > 0.0f) {
       change = (last - prev_close) / prev_close * 100.0f;
     }
   }
@@ -697,18 +768,47 @@ void render_history(const History& h) {
 
   // X-axis labels. The format reflects the REQUESTED range (the user's
   // mental model), not the API's `interval` field.
-  //   1D  → three FIXED session ticks (open / mid / close) at 0/50/100 % of
-  //         the plot width, so the axis always represents the whole trading
-  //         day no matter how much has elapsed. Shown in device-local time
-  //         (TZ is configured at boot).
+  //   1D  → FIXED wall-clock ticks so the axis always represents the whole
+  //         window no matter how much has elapsed. With an extended-hours
+  //         window that is four ticks SNAPPED to the window edges and the two
+  //         session dividers (04:00 / 09:30 / 16:00 / 20:00 ET) — even spacing
+  //         would put labels next to the divider lines instead of on them, and
+  //         09:30 / 16:00 are the two times a reader actually looks for.
+  //         Without a window it degrades to the old open / mid / close.
+  //         Shown in device-local time (TZ is configured at boot).
   //   else → three data-driven DD MMM ticks sampled from the points. (For 5d
   //         the backend returns intraday-resolution data spanning several
   //         calendar days, so a day component must be visible.)
   int card_w = CHART_W;   // card content width (card width - 2*pad_all)
+  for (int k = 0; k < X_TICK_COUNT; ++k) {
+    lv_obj_add_flag(g_x_labels[k], LV_OBJ_FLAG_HIDDEN);
+  }
   if (progressive) {
-    time_t span_s = sess_close - sess_open;
-    for (int k = 0; k < X_TICK_COUNT; ++k) {
-      time_t t = sess_open + (time_t)((long long)span_s * k / (X_TICK_COUNT - 1));
+    // Tick times, and the x position each one is pinned to. Dividers are
+    // pinned to the divider pixel so label and line cannot drift apart.
+    time_t t_ticks[X_TICK_COUNT];
+    int    x_ticks[X_TICK_COUNT];
+    int    n_ticks = 0;
+    time_t win_span = win_close - win_open;
+    if (g_divider_x[0] >= 0 || g_divider_x[1] >= 0) {
+      t_ticks[n_ticks] = win_open;  x_ticks[n_ticks++] = 0;
+      for (int i = 0; i < 2; ++i) {
+        if (g_divider_x[i] < 0) continue;
+        t_ticks[n_ticks] = (i == 0) ? sess_open : sess_close;
+        x_ticks[n_ticks++] = g_divider_x[i];
+      }
+      t_ticks[n_ticks] = win_close; x_ticks[n_ticks++] = plot_w;
+    } else {
+      for (int k = 0; k < X_TICKS_PLAIN; ++k) {
+        t_ticks[k] = win_open +
+                     (time_t)((long long)win_span * k / (X_TICKS_PLAIN - 1));
+        x_ticks[k] = (plot_w * k) / (X_TICKS_PLAIN - 1);
+      }
+      n_ticks = X_TICKS_PLAIN;
+    }
+
+    for (int k = 0; k < n_ticks; ++k) {
+      time_t t = t_ticks[k];
       struct tm tmv;
 #if defined(_WIN32)
       localtime_s(&tmv, &t);
@@ -717,8 +817,9 @@ void render_history(const History& h) {
 #endif
       snprintf(buf, sizeof(buf), "%02d:%02d", tmv.tm_hour, tmv.tm_min);
       lv_label_set_text(g_x_labels[k], buf);
+      lv_obj_remove_flag(g_x_labels[k], LV_OBJ_FLAG_HIDDEN);
 
-      int x_px = gutter + (plot_w * k) / (X_TICK_COUNT - 1);
+      int x_px = gutter + x_ticks[k];
       lv_obj_update_layout(g_x_labels[k]);
       int lw = lv_obj_get_width (g_x_labels[k]);
       int lh = lv_obj_get_height(g_x_labels[k]);
@@ -734,7 +835,7 @@ void render_history(const History& h) {
     // First / middle / LAST point. Sampling {0, n/3, 2n/3} left the most
     // recent date (the right edge) unlabelled — so 1W never showed today and
     // 5Y/Max never showed the current year. Anchor the last tick to n-1.
-    int x_idx[X_TICK_COUNT] = { 0, (n_native - 1) / 2, n_native - 1 };
+    int x_idx[X_TICKS_PLAIN] = { 0, (n_native - 1) / 2, n_native - 1 };
     time_t now = time(nullptr);
     // Pick the tick format from how much wall-time the window covers. "DD MMM"
     // is meaningless once the window spans years (5Y / Max show points decades
@@ -747,7 +848,7 @@ void render_history(const History& h) {
     }
     enum { FMT_DAY_MON, FMT_MON_YEAR, FMT_YEAR } xfmt =
         span_days > 730 ? FMT_YEAR : (span_days > 365 ? FMT_MON_YEAR : FMT_DAY_MON);
-    for (int k = 0; k < X_TICK_COUNT; ++k) {
+    for (int k = 0; k < X_TICKS_PLAIN; ++k) {
       int idx_native = x_idx[k];
       if (idx_native >= n_native) idx_native = n_native - 1;
       time_t t = 0;
@@ -772,6 +873,7 @@ void render_history(const History& h) {
         snprintf(buf, sizeof(buf), "%02d %s", tmv.tm_mday, kMonths[tmv.tm_mon]);
       }
       lv_label_set_text(g_x_labels[k], buf);
+      lv_obj_remove_flag(g_x_labels[k], LV_OBJ_FLAG_HIDDEN);
 
       int idx_interp = idx_native * CR_FACTOR;
       int x_px       = gutter + (plot_w * idx_interp) / (out_n - 1);

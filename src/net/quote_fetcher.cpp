@@ -551,11 +551,22 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   filter["interval"]          = true;
   filter["session_open"]      = true;   // range=1d only; absent otherwise
   filter["session_close"]     = true;
+  filter["window_open"]       = true;   // range=1d + prepost=1 only
+  filter["window_close"]      = true;
+  filter["prev_close"]        = true;
+  filter["market_state"]      = true;
   filter["points"][0]["last"] = true;
   filter["points"][0]["ts"]   = true;
 
   String url = String(cfg::API_BASE) + "/history/" + symbol + "?range=" + range +
                "&limit=" + String(cfg::HISTORY_POINTS);
+  // Extended hours for the intraday view: widens the window to 04:00-20:00 ET
+  // and adds window_open/window_close/prev_close/market_state. Also fixes a
+  // real bug — before the regular session opens there is no REGULAR data for
+  // today, so the plain call falls back to *yesterday's* session and the 1D
+  // chart silently showed the wrong day all through pre-market. The server
+  // ignores the flag for crypto and for every other range.
+  if (range == "1d") url += "&prepost=1";
   JsonDocument doc;
   if (!fetchAndParse(url, token, filter, doc)) {
     if (store.historyGenCurrent(gen)) store.setHistoryError(true);
@@ -634,6 +645,10 @@ bool fetchHistory(SettingsStore& settings, QuoteStore& store,
   h.timestamps    = std::move(timestamps);
   h.session_open  = (time_t)(doc["session_open"]  | (long long)0);
   h.session_close = (time_t)(doc["session_close"] | (long long)0);
+  h.window_open   = (time_t)(doc["window_open"]   | (long long)0);
+  h.window_close  = (time_t)(doc["window_close"]  | (long long)0);
+  h.prev_close    = doc["prev_close"] | NAN;
+  h.market_state  = doc["market_state"].as<const char*>() ? doc["market_state"].as<const char*>() : "";
   if (!store.historyGenCurrent(gen)) return false;
   store.setHistory(std::move(h));
   store.setHistoryError(false);

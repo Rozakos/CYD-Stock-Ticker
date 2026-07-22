@@ -61,12 +61,27 @@ struct History {
   // synthesises one-day spacing back from "now" in that case.
   std::vector<time_t> timestamps;
   // Regular trading-session bounds (epoch seconds, UTC) for the day the
-  // points cover. Populated only for range=="1d"; drives the progressive
-  // intraday chart, where the X axis spans the whole session and the line
-  // fills only the elapsed-so-far left portion. 0 when unknown — the detail
-  // screen then assumes a 6.5h session starting at the first point.
+  // points cover. Populated only for range=="1d". With the extended-hours
+  // window below these are no longer the axis bounds — they are where the
+  // regular open/close divider lines are drawn inside that window. 0 when
+  // unknown; the detail screen then assumes a 6.5h session from the first
+  // point and draws no dividers.
   time_t              session_open  = 0;
   time_t              session_close = 0;
+  // Extended-hours window (04:00-20:00 ET) returned for range=="1d" with
+  // prepost=1. This is what the 1D X axis spans; the line still fills only
+  // the elapsed-so-far portion. 0 when the server didn't supply it, in which
+  // case the chart falls back to the regular session bounds above.
+  time_t              window_open   = 0;
+  time_t              window_close  = 0;
+  // Previous regular-session close, straight from the API. The day-change
+  // baseline for the 1D header readout — previously back-derived from the
+  // live quote's percentage, which compounded that value's rounding.
+  // NAN when unknown.
+  float               prev_close    = NAN;
+  // "PRE" | "REGULAR" | "POST" | "CLOSED", as returned alongside the 1D
+  // history. Decides which session segments are offered/selectable.
+  String              market_state;
 };
 
 struct HistoryRequest {
