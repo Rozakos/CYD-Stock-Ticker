@@ -75,6 +75,26 @@ pipeline {
                          onlyIfSuccessful: true
       }
     }
+
+    // Publishing happens ONLY on a tag build. Multibranch creates a separate job
+    // per discovered tag and sets TAG_NAME there, so buildingTag() is exact -
+    // unlike checking whether HEAD carries a tag, which also fires on the main
+    // job whenever main's head is the tagged commit.
+    stage('Publish GitHub Release') {
+      when { buildingTag() }
+      steps {
+        withCredentials([string(credentialsId: 'github-pat', variable: 'GH_TOKEN')]) {
+          sh '''
+            set -eu
+            cp .pio/build/cyd/firmware.bin "cyd-stock-ticker-${TAG_NAME}.bin"
+            python3 scripts/publish_release.py \
+              --repo Rozakos/CYD-Stock-Ticker \
+              --tag "${TAG_NAME}" \
+              --asset "cyd-stock-ticker-${TAG_NAME}.bin"
+          '''
+        }
+      }
+    }
   }
 
   post {
