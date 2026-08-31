@@ -987,3 +987,38 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 Don't pre-build any of these unless asked — list them so the next session
 has a head start.
+
+## CI (self-hosted Jenkins)
+
+`https://jenkins.rozakos.eu` — job **`CYD-Stock-Ticker-MB`**, a *multibranch* pipeline defined
+by the `Jenkinsfile` in this repo. Every push to `main` builds, runs the 5 Unity unit tests (`pio test -e native`) and reports the image size against the 3 MB `huge_app` slot. Triggered by
+a GitHub webhook through a Cloudflare Tunnel, with a 5-minute rescan as a fallback.
+
+### Releasing
+
+Push a `v*` tag and CI publishes a GitHub Release with `firmware.bin` attached:
+
+```bash
+git tag -a v1.2.0 -m "v1.2.0"
+git push origin v1.2.0          # tags do NOT go with a plain `git push`
+```
+
+`scripts/publish_release.py` does the upload. It is idempotent — rebuilding an
+already-released tag reuses the release and replaces the asset rather than
+failing.
+
+### Things that will trip you up
+
+- **`src/secrets.h` is gitignored, so a clean clone cannot compile.** CI copies
+  ``src/secrets_example.h`` into place, exactly as you would by hand. That means CI proves the
+  code *compiles*; the published artifact carries placeholder credentials and is
+  not a drop-in image for a real network.
+- **A tag is a snapshot.** Rebuilding an old tag runs the `Jenkinsfile` *from that
+  commit*, not the current one. Tags predating a pipeline fix will keep failing,
+  and that is correct.
+- **Multibranch is required, not a preference.** Jenkins polls with
+  `git ls-remote -h`, which lists heads only and cannot see tags at all — a plain
+  pipeline-from-SCM job never notices a pushed tag whatever its branch specs say.
+- **Build strategies are a whitelist.** If you edit them in the Jenkins UI, keep
+  *both* the tag and branch strategies; configuring only tags silently stops
+  `main` building.
