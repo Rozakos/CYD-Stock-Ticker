@@ -116,7 +116,7 @@ void netTask(void*) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     setenv("TZ", cfg::TIME_TZ, 1);
     tzset();
-    web_admin::begin(&g_settings);
+    web_admin::begin(&g_settings, &g_quoteStore);
     mdns_svc::begin();
     xSemaphoreTake(g_lvglMu, portMAX_DELAY);
     lv_screen_load(list_screen::screen());

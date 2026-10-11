@@ -2,17 +2,57 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <AsyncJson.h>
 #include <ESPAsyncWebServer.h>
+#include <math.h>
 
 #include "../config.h"
 #include "../settings/settings_store.h"
 #include "device_identity.h"
+#include "quote_store.h"
 #include "web_admin_page.h"
 
 namespace {
 
 AsyncWebServer  g_server(80);
 SettingsStore*  g_settings = nullptr;
+QuoteStore*     g_quotes   = nullptr;
+
+// Upper bound for the JSON settings API. Keeps a single request (and the
+// batch quote fetch it implies) small on this heap-tight board.
+constexpr size_t kMaxApiSymbols = 16;
+
+// Same character set the quote API accepts: A-Z 0-9 . - ^ (e.g. BRK.B, BTC-USD, ^GSPC).
+bool valid_symbol(const String& s) {
+  if (s.length() == 0 || s.length() > 12) return false;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (!(isalnum((unsigned char)c) || c == '.' || c == '-' || c == '^')) return false;
+  }
+  return true;
+}
+
+void send_json(AsyncWebServerRequest* req, int code, JsonDocument& doc) {
+  String out;
+  serializeJson(doc, out);
+  req->send(code, "application/json", out);
+}
+
+void send_error(AsyncWebServerRequest* req, int code, const char* message) {
+  JsonDocument d;
+  d["error"] = message;
+  send_json(req, code, d);
+}
+
+const char* session_name(Session s) {
+  switch (s) {
+    case Session::Pre:     return "PRE";
+    case Session::Regular: return "REGULAR";
+    case Session::Post:    return "POST";
+    case Session::Closed:  return "CLOSED";
+    default:               return nullptr;
+  }
+}
 
 void redirect_to_settings(AsyncWebServerRequest* req) {
   AsyncWebServerResponse* response = req->beginResponse(303, "text/plain", "");
@@ -101,8 +141,9 @@ void send_settings_page(AsyncWebServerRequest* req) {
 
 namespace web_admin {
 
-void begin(SettingsStore* settings) {
+void begin(SettingsStore* settings, QuoteStore* quotes) {
   g_settings = settings;
+  g_quotes   = quotes;
 
   g_server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
     redirect_to_settings(req);
@@ -175,10 +216,95 @@ void begin(SettingsStore* settings) {
     JsonArray caps = d["capabilities"].to<JsonArray>();
     caps.add("web_ui");
     caps.add("settings");
-    String out;
-    serializeJson(d, out);
-    req->send(200, "application/json", out);
+    caps.add("settings_api");
+    if (g_quotes) caps.add("state");
+    send_json(req, 200, d);
   });
+
+  // Live watchlist as shown on the display. Small on purpose (~60 B/symbol).
+  g_server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!g_quotes) { send_error(req, 404, "no live state"); return; }
+    JsonDocument d;
+    JsonArray arr = d["quotes"].to<JsonArray>();
+    Session session = Session::Unknown;
+    for (const Quote& q : g_quotes->snapshot()) {
+      JsonObject o = arr.add<JsonObject>();
+      o["symbol"] = q.symbol;
+      if (!isnan(q.last))      o["price"]      = serialized(String(q.last, 2));
+      else                     o["price"]      = nullptr;
+      if (!isnan(q.changePct)) o["change_pct"] = serialized(String(q.changePct, 2));
+      else                     o["change_pct"] = nullptr;
+      o["fresh"] = q.fresh;
+      if (q.extended()) {
+        o["ext_price"] = serialized(String(q.extPrice, 2));
+        if (!isnan(q.extChangePct)) o["ext_change_pct"] = serialized(String(q.extChangePct, 2));
+      }
+      if (q.session != Session::Unknown) session = q.session;
+    }
+    if (const char* name = session_name(session)) d["market_state"] = name;
+    d["updated"] = (long long)g_quotes->lastUpdate();
+    send_json(req, 200, d);
+  });
+
+  // JSON settings for the app's native watchlist editor. The API token is
+  // write-only here as on the web page: it is never returned.
+  g_server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
+    JsonDocument d;
+    JsonArray arr = d["symbols"].to<JsonArray>();
+    for (const auto& sym : g_settings->symbols()) arr.add(sym);
+    d["refresh_s"]   = g_settings->refreshSeconds();
+    d["max_symbols"] = kMaxApiSymbols;
+    d["has_api_key"] = g_settings->apiKey().length() > 0;
+    send_json(req, 200, d);
+  });
+
+  // POST {"symbols":["AAPL","NVDA"],"refresh_s":60,"api_key":"..."} -- every
+  // field optional; symbols replace the watchlist in the given order.
+  auto* post_settings = new AsyncCallbackJsonWebHandler(
+      "/api/settings", [](AsyncWebServerRequest* req, JsonVariant& body) {
+        if (!body.is<JsonObject>()) { send_error(req, 400, "expected a JSON object"); return; }
+        JsonObject in = body.as<JsonObject>();
+
+        std::vector<String> symbols = g_settings->symbols();
+        if (in["symbols"].is<JsonArray>()) {
+          symbols.clear();
+          for (JsonVariant v : in["symbols"].as<JsonArray>()) {
+            String sym = v.as<String>();
+            sym.trim();
+            sym.toUpperCase();
+            if (!valid_symbol(sym)) { send_error(req, 400, "invalid symbol"); return; }
+            bool dup = false;
+            for (const auto& e : symbols) dup = dup || e == sym;
+            if (!dup) symbols.push_back(sym);
+          }
+          if (symbols.empty())                  { send_error(req, 400, "keep at least one symbol"); return; }
+          if (symbols.size() > kMaxApiSymbols)  { send_error(req, 400, "too many symbols"); return; }
+        }
+
+        uint32_t refresh = g_settings->refreshSeconds();
+        if (!in["refresh_s"].isNull()) {
+          long r = in["refresh_s"] | -1L;
+          if (r < (long)cfg::MIN_REFRESH_SECONDS || r > 3600) {
+            send_error(req, 400, "refresh_s must be 15..3600");
+            return;
+          }
+          refresh = (uint32_t)r;
+        }
+
+        String api = g_settings->apiKey();
+        if (in["api_key"].is<const char*>()) {
+          api = in["api_key"].as<String>();
+          api.trim();
+        }
+
+        g_settings->update(api, refresh, web_admin_page::symbols_csv(symbols));
+        JsonDocument d;
+        d["ok"] = true;
+        send_json(req, 200, d);
+      });
+  post_settings->setMethod(HTTP_POST);
+  post_settings->setMaxContentLength(1024);
+  g_server.addHandler(post_settings);
 
   g_server.onNotFound([](AsyncWebServerRequest* req) {
     req->send(404, "text/plain", "not found");
