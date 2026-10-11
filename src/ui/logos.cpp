@@ -1,4 +1,5 @@
 #include "logos.h"
+#include "../util/logo_path.h"
 
 #include <LittleFS.h>
 
@@ -155,11 +156,6 @@ struct PixelBounds {
   uint32_t y1;
 };
 
-String logoPath(const String& symbol) {
-  String s = symbol;
-  s.toUpperCase();
-  return String("/logos/") + s + ".png";
-}
 
 void freeRuntimeLogo(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_DELETE) return;

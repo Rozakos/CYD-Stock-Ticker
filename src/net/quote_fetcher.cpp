@@ -1,4 +1,5 @@
 #include "quote_fetcher.h"
+#include "../util/logo_path.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -102,19 +103,6 @@ int startApiGet(const String& url, const String& token) {
 // even for the body buffer; fetchQuotes then drops the persistent connection
 // at the end of the cycle so the heap recovers before the next retry.
 bool g_logoFetchStarved = false;
-
-String logoPath(const String& symbol) {
-  String s = symbol;
-  s.toUpperCase();
-  String clean;
-  clean.reserve(s.length());
-  for (size_t i = 0; i < s.length(); ++i) {
-    char c = s[i];
-    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) clean += c;
-    else clean += '_';
-  }
-  return String("/logos/") + clean + ".png";
-}
 
 bool fetchAndParse(const String& url, const String& token,
                    const JsonDocument& filter, JsonDocument& doc) {
@@ -686,6 +674,27 @@ void purgeStaleLogoCache(uint32_t version) {
   if (wf) { wf.print(version); wf.close(); }
   log_i("[logo] cache purged: %u file(s) removed -> version %u",
         (unsigned)pngs.size(), (unsigned)version);
+}
+
+void pruneUnusedLogos(const std::vector<String>& symbols) {
+  // Logos of symbols that left the watchlist were never deleted; once the
+  // partition filled, new logos silently stopped caching. Boot-only (before
+  // the tasks start), so no FS guard is needed.
+  File dir = LittleFS.open("/logos");
+  if (!dir || !dir.isDirectory()) return;
+  std::vector<String> drop;
+  for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+    String name = e.name();
+    e.close();
+    if (!name.endsWith(".png")) continue;
+    if (!name.startsWith("/")) name = String("/logos/") + name;
+    bool keep = false;
+    for (const auto& sym : symbols) keep = keep || name == logoPath(sym);
+    if (!keep) drop.push_back(name);
+  }
+  dir.close();
+  for (const String& p : drop) LittleFS.remove(p);
+  if (!drop.empty()) log_i("[logo] pruned %u logo(s) of removed symbols", (unsigned)drop.size());
 }
 
 }  // namespace fetcher

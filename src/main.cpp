@@ -281,6 +281,7 @@ void setup() {
   // keyed only by 48x48 dims, so a same-size quality bump is otherwise unseen).
   fetcher::purgeStaleLogoCache(cfg::LOGO_CACHE_VERSION);
   g_settings.begin(API_TOKEN_SEED, WIFI_SSID, WIFI_PASS);
+  fetcher::pruneUnusedLogos(g_settings.symbols());
   g_quoteStore.begin();
 
   // Provisioned boot: BLE will never run (netTask skips ble_prov::begin),

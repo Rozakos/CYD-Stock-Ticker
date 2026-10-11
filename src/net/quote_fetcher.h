@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <vector>
 
 class SettingsStore;
 class QuoteStore;
@@ -44,5 +45,9 @@ void releaseApiConnection();
 // at the current server quality/size) and record the new version. Cheap no-op
 // once the versions match. Call once at boot, after LittleFS is mounted.
 void purgeStaleLogoCache(uint32_t version);
+
+// Delete cached /logos/*.png that belong to no symbol in `symbols`. Boot-time
+// only (before the tasks start).
+void pruneUnusedLogos(const std::vector<String>& symbols);
 
 }  // namespace fetcher

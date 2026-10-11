@@ -424,6 +424,15 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 
 ## Recently shipped (most recent first)
 
+- **Logo path mismatch fixed + unused logos pruned** (2026-10-11, Claude Opus 5.5,
+  built + native tests, not flashed): the fetcher stored logos sanitized
+  (`BTC-USD` -> `/logos/BTC_USD.png`) while the UI looked up `/logos/BTC-USD.png`,
+  so crypto / `BRK.B` / `^GSPC` logos never showed and were never re-fetched.
+  Both now use `util/logo_path.h`. At boot, `fetcher::pruneUnusedLogos()` deletes
+  cached logos of symbols no longer in the watchlist (was the "LRU eviction" ask).
+  Also new: `GET /api/state` and JSON `GET/POST /api/settings` for the Rozakos
+  Home app (see rozakos-smart-home docs/rozakos-local-protocol.md).
+
 - **Web-admin OOM crash fix + lwIP transport watchdog** (2026-07-09):
   opening `/settings` aborted the device — AsyncResponseStream's cbuf grew
   by realloc-and-copy past what the steady-state heap could hold. Now
@@ -981,9 +990,6 @@ logos to compile-time ARGB8888 C arrays — see the Logos section above.)
 - Greek month abbreviations: need Montserrat 12/14 rebuilt with Greek Unicode
   range (U+0370–U+03FF) via the LVGL font converter. Flash ~64% now under
   huge_app, so there's room, but new fonts are the biggest flash cost.
-- LRU eviction of `/logos/<SYM>.png` for symbols no longer in the list (the
-  partition never reclaims old logos; a fs-full write guard prevents crashes
-  but new logos silently stop caching once it fills — less urgent at 896 KB).
 
 Don't pre-build any of these unless asked — list them so the next session
 has a head start.
