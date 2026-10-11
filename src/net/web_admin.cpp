@@ -157,6 +157,9 @@ void begin(SettingsStore* settings, QuoteStore* quotes) {
     String api  = req->hasParam("api_key", true)   ? req->getParam("api_key", true)->value()   : "";
     String ref  = req->hasParam("refresh_s", true) ? req->getParam("refresh_s", true)->value() : String(cfg::DEFAULT_REFRESH_SECONDS);
     api.trim();
+    // The page never shows the token, so a blank field means "unchanged".
+    if (api.length() == 0) api = g_settings->apiKey();
+    else if (api == "-")   api = "";
     g_settings->update(api, ref.toInt(), web_admin_page::symbols_csv(*g_settings));
     redirect_to_settings(req);
   });

@@ -187,10 +187,21 @@ void write_settings_page(Writer& response, SettingsStore& settings) {
   response.print(F("' required>"
                    "<div class=hint>Seconds between quote refreshes.</div>"));
 
-  response.print(F("<label>API token</label><input name=api_key value='"));
-  response.print(html_escape(settings.apiKey()));
-  response.print(F("' placeholder='paste your bearer token here'>"
-                   "<div class=hint>Bearer token for "
+  // The stored token is never sent back to the browser (anyone on the LAN
+  // could read it from this page); only whether one is set.
+  response.print(F("<label>API token</label><input name=api_key type=password autocomplete=off value='' placeholder='"));
+  {
+    String key = settings.apiKey();
+    if (key.length()) {
+      response.print(F("set, ending in "));
+      response.print(html_escape(key.substring(key.length() > 4 ? key.length() - 4 : 0)));
+      response.print(F(" (leave blank to keep)"));
+    } else {
+      response.print(F("paste your bearer token here"));
+    }
+  }
+  response.print(F("'>"));
+  response.print(F("<div class=hint>Leave blank to keep the current token; enter - to clear it. Bearer token for "
                    "<code>rozakos.eu/stocks/api/v1</code>. Sent as "
                    "<code>Authorization: Bearer &lt;token&gt;</code>.</div>"
                    "<button type=submit>Save settings</button></form>"));
